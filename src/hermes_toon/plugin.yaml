@@ -1,0 +1,24 @@
+name: web-toon
+version: "0.1.0"
+description: >-
+  Paid web extract over TOON: each web_extract pays a TOON node one micropayment
+  (about $0.001) from a local payer sidecar; the node fetches the page through an
+  Anyone network exit and returns markdown plus a wuzzy/crawl v1 content hash.
+  Disclosure: with TOON_PAYER_URL set, every web_extract this provider serves
+  spends from the sidecar's payment channel up to the sidecar's daily cap
+  (PAYER_DAILY_CAP) and origin allowlist (PAYER_ALLOWED_ORIGINS); the sidecar's
+  configuration, not this plugin, is the spending control.
+author: Drew Pierson
+kind: backend
+requires_hermes: ">=0.21.3"
+python_dependencies:
+  - "httpx>=0.27,<0.29"
+requires_env:
+  - name: TOON_PAYER_URL
+    prompt: anonfetch payer sidecar URL
+    help: The local sidecar that holds the payment channel, e.g. http://127.0.0.1:3502. Run it from github.com/drew-dot-com/anonfetch/payer.
+provides_web_providers:
+  - toon
+provides_tools: []
+provides_hooks: []
+provides_middleware: []
