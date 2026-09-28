@@ -1,6 +1,6 @@
 name: hermes-toon
 repo: https://github.com/drew-dot-com/hermes-toon
-sha: 0000000000000000000000000000000000000000
+sha: c22e7694a81df3e6509bafde948b84569efcd355
 version: "0.1.0"
 subdir: src/hermes_toon
 description: >-
