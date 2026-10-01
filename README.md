@@ -44,25 +44,39 @@ SOLANA_KEYPAIR=/path/to/keypair.json PAYER_DAILY_CAP=100000 node server.mjs
 ```
 
 The keypair is a Solana mainnet wallet in `solana-keygen` JSON format holding a
-little USDC (0.50 is opened into the channel on the first fetch, refundable when
-the channel settles) and about 0.01 SOL for the one channel-open transaction.
-Use a dedicated wallet. The sidecar listens on `127.0.0.1:3502`; check it with
-`curl localhost:3502/health`. Full options in
+little USDC: 0.50 is locked into a payment channel on the first fetch
+(`PAYER_CHANNEL_DEPOSIT`), and you get back whatever you have not spent when
+the channel closes. Opening needs no SOL, because the node co-signs the open
+and pays the fee and rent; closing the channel later is the one step that
+costs SOL. Use a dedicated wallet. The sidecar listens on `127.0.0.1:3502`;
+check it with `curl localhost:3502/health`. Full options in
 [anonfetch/payer/README.md](https://github.com/drew-dot-com/anonfetch/tree/main/payer).
 
 ### 2. The plugin
+
+Three steps: install, enable, select.
+
+**Install.** Hermes warns that this is a custom (unreviewed) source, since the
+plugin is not in the Hermes catalog yet, and asks for `TOON_PAYER_URL`. Answer
+`http://127.0.0.1:3502`, or skip and set it in `~/.hermes/.env` later.
 
 ```sh
 hermes plugins install 'https://github.com/drew-dot-com/hermes-toon#src/hermes_toon'
 ```
 
-Then in `~/.hermes/.env`:
-
 ```
 TOON_PAYER_URL=http://127.0.0.1:3502
 ```
 
-and in `~/.hermes/config.yaml`:
+**Enable.** Hermes asks before it installs the plugin's one Python dependency
+(`httpx`); answer `y`. An install run without a terminal skips this and
+leaves the plugin disabled, so run it yourself either way.
+
+```sh
+hermes plugins enable web-toon
+```
+
+**Select.** In `~/.hermes/config.yaml`:
 
 ```yaml
 web:
@@ -70,8 +84,8 @@ web:
 ```
 
 Keep your search backend as it is: `toon` is extract only, and Hermes routes
-search elsewhere. Restart Hermes; `hermes tools` shows "TOON paid fetch" with
-the paid badge.
+search elsewhere. Start a new session (and `hermes gateway restart` if you run
+the gateway); `hermes tools` shows "TOON paid fetch" with the paid badge.
 
 ## When to turn it on
 
@@ -84,15 +98,18 @@ fetch.
 
 ```
 Hermes web_extract -> GET /extract?url=  (localhost sidecar)
-  -> one ILP packet with a signed cumulative claim -> TOON connector
+  -> one ILP packet with a signed x402 voucher -> TOON connector
   -> anonfetch app -> Anyone circuit -> exit -> origin
   <- markdown + hashes in the FULFILL <- ...
 ```
 
-The sidecar signs an off-chain claim per fetch on one channel; nothing goes on
-chain per request. The node redeems claims in batches. The first fetch opens the
-channel (one transaction). Deleting the sidecar's `channel-store.json` and
-running again opens another channel, so keep it.
+Each fetch is one ILP packet carrying a signed x402 `batch-settlement`
+voucher for the channel's running total; nothing goes on chain per request,
+and the node settles vouchers in batches. The first fetch opens the channel
+(one transaction, paid by the node). The sidecar keeps its channel state in
+`~/.anonfetch-payer/` (`channels.json` and `channels.peers.json`). Keep both:
+without the channel config the channel can be neither found nor closed, so
+its deposit stays locked.
 
 ## Development
 
