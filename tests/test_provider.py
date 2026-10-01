@@ -70,7 +70,11 @@ def test_extract_maps_a_paid_page(provider):
     assert "error" not in entry
     assert entry["url"] == "https://a.example/p"
     assert entry["title"] == "A page"
-    assert entry["content"] == GOOD["content"] == entry["raw_content"]
+    assert entry["raw_content"] == GOOD["content"]
+    page, footer = entry["content"].split("\n\n---\n")
+    assert page == GOOD["content"].rstrip()
+    assert footer.startswith("TOON receipt: paid $0.001000 USDC to g.drew.anon;")
+    assert "Anyone network exit" in footer and f"sha256:{'ab' * 32}" in footer and "job j1" in footer
     meta = entry["metadata"]
     assert meta["sourceURL"] == "https://a.example/p"
     assert meta["content_hash"] == "ab" * 32
@@ -88,6 +92,23 @@ def test_refusals_become_per_url_errors(provider):
     assert "HTTP 404" in nf["error"] and "$0.001000" in nf["error"]
     assert "thin" in thin["error"]
     assert "error" not in good
+    for failed in (cap, nf, thin):
+        assert not failed["content"]
+
+
+def test_errors_say_no_page_was_retrieved(provider, monkeypatch):
+    [cap] = provider.extract(["https://a.example/cap"])
+    assert cap["error"].startswith("No page content was retrieved.")
+    monkeypatch.setenv("TOON_PAYER_URL", "http://127.0.0.1:9")
+    [down] = provider.extract(["https://a.example/p"])
+    assert down["error"].startswith("No page content was retrieved.")
+
+
+def test_receipt_flags_truncation():
+    from hermes_toon.provider import receipt
+
+    assert "the text above is truncated" in receipt({**GOOD, "truncated": True})
+    assert "covers the page above this receipt" in receipt(GOOD)
 
 
 def test_unreachable_sidecar_is_an_error_not_an_exception(monkeypatch):

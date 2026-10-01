@@ -1,5 +1,5 @@
 name: web-toon
-version: "0.1.0"
+version: "0.1.1"
 description: >-
   Paid web extract over TOON: each web_extract pays a TOON node one micropayment
   (about $0.001) from a local payer sidecar; the node fetches the page through an

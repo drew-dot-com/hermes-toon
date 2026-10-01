@@ -26,6 +26,13 @@ your IP, and never the node's.
 | `metadata.price` | what this fetch cost, in USDC base units |
 | `metadata.fetched_at`, `metadata.job_id` | when, and the node's job id for the receipt |
 
+Hermes passes the model only `url`, `title`, `content` and `error`, never
+`metadata`, so the plugin also appends a one-line receipt to `content`, after a
+`---` rule: what was paid and to which route, the exit, the content hash, the
+job id and the time. `raw_content` is the page alone, which is what
+`content_hash` covers. A failed fetch has no content and an `error` that starts
+with "No page content was retrieved."
+
 Bodies are capped at 24 KiB of markdown (`metadata.truncated` says when); the
 hash always covers the whole document.
 
@@ -44,10 +51,12 @@ SOLANA_KEYPAIR=/path/to/keypair.json PAYER_DAILY_CAP=100000 node server.mjs
 ```
 
 The keypair is a Solana mainnet wallet in `solana-keygen` JSON format holding a
-little USDC: 0.50 is locked into a payment channel on the first fetch
-(`PAYER_CHANNEL_DEPOSIT`), and you get back whatever you have not spent when
-the channel closes. Opening needs no SOL, because the node co-signs the open
-and pays the fee and rent; closing the channel later is the one step that
+little USDC: the first fetch locks a deposit into a payment channel, and you
+get back whatever you have not spent when the channel closes. The deposit is
+`PAYER_CHANNEL_DEPOSIT` (default 0.50) raised to the node's minimum, which is
+1.00 USDC on the default node, so fund the wallet with at least 1.00.
+Opening needs no SOL, because the node co-signs the open and pays the fee and
+rent; closing the channel later is the one step that
 costs SOL. Use a dedicated wallet. The sidecar listens on `127.0.0.1:3502`;
 check it with `curl localhost:3502/health`. Full options in
 [anonfetch/payer/README.md](https://github.com/drew-dot-com/anonfetch/tree/main/payer).
