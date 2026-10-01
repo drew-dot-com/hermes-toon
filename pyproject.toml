@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hermes-toon"
-version = "0.1.1"
+version = "0.1.2"
 description = "Hermes Agent web-extract provider that pays a TOON node per fetch: pages fetched through Anyone network exits, returned as markdown with a reproducible content hash"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

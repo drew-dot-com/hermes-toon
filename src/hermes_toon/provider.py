@@ -11,9 +11,10 @@ fetched by the node through an Anyone network exit. Anything else is returned as
 that URL's ``error`` entry, never raised.
 
 Hermes hands the model only ``url``, ``title``, ``content`` and ``error`` per page
-(``tools/web_tools_truncate._trim_results``), so ``metadata`` never reaches the
-agent. The receipt therefore also rides in ``content``, as a footer after the
-page; ``raw_content`` stays the page alone, which is what ``content_hash`` covers.
+(``tools/web_tools_truncate._trim_results``), and rebuilds ``content`` from
+``raw_content`` first, so ``metadata`` never reaches the agent. The receipt
+therefore rides in both ``content`` and ``raw_content``, as a footer after the
+page; ``metadata`` keeps the fields, and ``content_hash`` covers the page alone.
 """
 
 from __future__ import annotations
@@ -102,8 +103,7 @@ def extract_one(client: httpx.Client, base: str, url: str) -> dict[str, Any]:
 
     page = payload.get("content") or ""
     entry = document(payload.get("final_url") or url, payload.get("title") or "", page, source_url=url)
-    entry["content"] = f"{page.rstrip()}\n\n---\n{receipt(payload)}\n"
-    entry["raw_content"] = page
+    entry["content"] = entry["raw_content"] = f"{page.rstrip()}\n\n---\n{receipt(payload)}\n"
     entry["metadata"].update(
         {
             "content_hash": payload.get("content_hash"),

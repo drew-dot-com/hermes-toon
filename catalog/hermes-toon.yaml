@@ -1,7 +1,7 @@
 name: hermes-toon
 repo: https://github.com/drew-dot-com/hermes-toon
 sha: f163b72cee923031db950a85f880cba9ce98828b
-version: "0.1.1"
+version: "0.1.2"
 subdir: src/hermes_toon
 description: >-
   Paid web extract over TOON: web_extract pays a TOON node about $0.001 per

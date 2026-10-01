@@ -70,7 +70,7 @@ def test_extract_maps_a_paid_page(provider):
     assert "error" not in entry
     assert entry["url"] == "https://a.example/p"
     assert entry["title"] == "A page"
-    assert entry["raw_content"] == GOOD["content"]
+    assert entry["raw_content"] == entry["content"]  # Hermes rebuilds content from raw_content
     page, footer = entry["content"].split("\n\n---\n")
     assert page == GOOD["content"].rstrip()
     assert footer.startswith("TOON receipt: paid $0.001000 USDC to g.drew.anon;")
@@ -131,3 +131,16 @@ def test_setup_schema_is_paid(provider):
     schema = provider.get_setup_schema()
     assert schema["badge"] == "paid"
     assert schema["env_vars"][0]["key"] == "TOON_PAYER_URL"
+
+
+@pytest.mark.skipif(not __import__("os").environ.get("HERMES_SRC"), reason="needs a real Hermes checkout")
+def test_receipt_survives_hermes_result_shaping(provider):
+    """What the model sees: web_extract_tool runs _truncate_results then _trim_results."""
+    from tools.web_tools_truncate import _effective_char_limit, _trim_results, _truncate_results
+
+    ANSWERS["https://a.example/p"] = (200, GOOD)
+    results = provider.extract(["https://a.example/p"])
+    _truncate_results(results, _effective_char_limit(None), {"processing_applied": [], "pages": []})
+    [seen] = _trim_results(results)
+    assert "TOON receipt: paid $0.001000 USDC" in seen["content"]
+    assert f"sha256:{'ab' * 32}" in seen["content"]

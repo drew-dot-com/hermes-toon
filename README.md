@@ -27,10 +27,10 @@ your IP, and never the node's.
 | `metadata.fetched_at`, `metadata.job_id` | when, and the node's job id for the receipt |
 
 Hermes passes the model only `url`, `title`, `content` and `error`, never
-`metadata`, so the plugin also appends a one-line receipt to `content`, after a
-`---` rule: what was paid and to which route, the exit, the content hash, the
-job id and the time. `raw_content` is the page alone, which is what
-`content_hash` covers. A failed fetch has no content and an `error` that starts
+`metadata`, so the plugin also appends a one-line receipt to the page text
+(`content` and `raw_content`), after a `---` rule: what was paid and to which
+route, the exit, the content hash, the job id and the time. `content_hash`
+covers the page above the rule, not the receipt. A failed fetch has no content and an `error` that starts
 with "No page content was retrieved."
 
 Bodies are capped at 24 KiB of markdown (`metadata.truncated` says when); the
