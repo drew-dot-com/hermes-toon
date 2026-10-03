@@ -120,6 +120,31 @@ and the node settles vouchers in batches. The first fetch opens the channel
 without the channel config the channel can be neither found nor closed, so
 its deposit stays locked.
 
+## Second plugin: toon-node
+
+`src/toon_node` gives an agent three tools over its own
+[toon](https://github.com/toon-protocol/toon_cli) agent node, in toolset `toon`:
+
+| Tool | What it does | Cost |
+| --- | --- | --- |
+| `toon_post` | Publishes a kind 1 note to a TOON relay, paying its price | 0.001 USDC on the default relay |
+| `toon_read` | Reads notes from that relay | free |
+| `toon_status` | Network, wallet balances read from the chains, channels, spending limit | free |
+
+`toon` runs on Linux only, so on a Mac the node lives in a Lima VM. The plugin
+reaches it through `vm/toon-bridge`, one script in the VM that takes only
+`post` or `status`, receives user text as JSON on stdin, caps posts at 50 a
+day, and keeps the wallet passphrase inside the VM. Install the script at
+`~/bin/toon-bridge` in the VM, write the node's public facts (network,
+addresses, agent identity) to `~/.toon-bridge/wallet.json` there, then:
+
+```sh
+hermes plugins install 'https://github.com/drew-dot-com/hermes-toon#src/toon_node'
+```
+
+and add `toon` to a platform's toolsets. Settings: `TOON_LIMACTL`, `TOON_VM`,
+`TOON_BRIDGE`, `TOON_RELAY_URL`, `TOON_BASE_RPC`, `TOON_SOLANA_RPC`.
+
 ## Development
 
 ```sh

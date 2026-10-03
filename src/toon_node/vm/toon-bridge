@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# toon-bridge: the only door from a Hermes agent into a toon agent node.
+#
+# Runs inside the VM that holds the node. A caller outside reaches it as
+#   limactl shell <vm> -- ~/bin/toon-bridge <post|status>
+# and passes anything user-supplied as JSON on stdin, never as an argument,
+# so nothing a chat user writes is ever parsed by a shell.
+#
+#   post     stdin {"content": "..."}: publish one kind 1 note to RELAY,
+#            paying the relay's price. Capped at MAX_POSTS a UTC day here,
+#            and by the node's own spending limit underneath.
+#   status   the node, its channels, its spending limit, today's post count
+#            and the public facts in ~/.toon-bridge/wallet.json.
+#
+# Signing a paid write unlocks the wallet, so `post` hands toon the passphrase
+# file (TOON_BRIDGE_PASSPHRASE_FILE, never printed). It stays inside the VM:
+# the caller gets no shell here, and the commands that would raise the
+# spending limit or read the wallet (limit set, wallet) are not reachable.
+set -uo pipefail
+
+TOON=${TOON_BIN:-$HOME/.local/bin/toon}
+RELAY=${TOON_BRIDGE_RELAY:-wss://relay.167-233-221-236.sslip.io}
+MAX_POSTS=${TOON_BRIDGE_MAX_POSTS:-50}
+MAX_CHARS=1000
+STATE=$HOME/.toon-bridge
+mkdir -p "$STATE"
+
+fail() { jq -cn --arg e "$1" '{error: $e}'; exit "${2:-2}"; }
+
+post() {
+  local input content count file out
+  input=$(head -c 8192)
+  content=$(jq -er '.content | strings' <<<"$input" 2>/dev/null) || fail "stdin needs {\"content\": \"...\"}"
+  [ -n "$content" ] || fail "content is empty"
+  [ "${#content}" -le "$MAX_CHARS" ] || fail "content is over $MAX_CHARS characters"
+  file=$STATE/posts-$(date -u +%F)
+  exec 9>"$STATE/post.lock"
+  flock 9
+  count=$(cat "$file" 2>/dev/null || echo 0)
+  [ "$count" -lt "$MAX_POSTS" ] || fail "today's cap of $MAX_POSTS posts is reached" 3
+  if out=$(TOON_PASSPHRASE_FILE=${TOON_BRIDGE_PASSPHRASE_FILE:-$HOME/secrets/passphrase} "$TOON" event publish --kind 1 --content "$content" --tags '[["client","toon-bridge"]]' \
+      --relay "$RELAY" --yes --json 2>&1); then
+    echo $((count + 1)) >"$file"
+    jq -c --argjson n $((count + 1)) --argjson cap "$MAX_POSTS" '. + {posts_today: $n, post_cap: $cap}' <<<"$out"
+  else
+    jq -c . <<<"$out" 2>/dev/null || fail "$out" 1
+    exit 1
+  fi
+}
+
+status() {
+  local s c l facts
+  s=$("$TOON" status --json 2>&1) || fail "toon status: $s" 1
+  c=$("$TOON" channel list --json 2>&1) || c='{"channels":null}'
+  l=$("$TOON" limit show --json 2>&1) || l='{"limits":null}'
+  facts=$(cat "$STATE/wallet.json" 2>/dev/null || echo '{}')
+  jq -cn --argjson s "$s" --argjson c "$c" --argjson l "$l" --argjson f "$facts" \
+    --argjson posts "$(cat "$STATE/posts-$(date -u +%F)" 2>/dev/null || echo 0)" --argjson cap "$MAX_POSTS" \
+    --arg relay "$RELAY" \
+    '{facts: $f, relay: $relay, node: $s.agent_node, channels: $c.channels, limits: $l.limits,
+      posts_today: $posts, post_cap: $cap}'
+}
+
+case "${1:-}" in
+  post) post ;;
+  status) status ;;
+  *) fail "usage: toon-bridge post|status" ;;
+esac

@@ -1,0 +1,21 @@
+name: toon-node
+version: "0.1.0"
+description: >-
+  Tools over a toon agent node (github.com/toon-protocol/toon_cli): toon_post publishes a
+  paid note to a TOON relay, toon_read reads that relay for free, toon_status reports the
+  node's network, wallet balances read from the chains, channels and spending limit.
+  Disclosure: every toon_post spends from the node's payment channel (0.001 USDC on the
+  default relay), capped by toon-bridge (50 posts a day) and by the node's own spending
+  limit, which only the wallet passphrase can raise and this plugin never sees.
+author: Drew Pierson
+kind: backend
+requires_hermes: ">=0.21.3"
+python_dependencies:
+  - "httpx>=0.27,<0.29"
+  - "websockets>=12"
+provides_tools:
+  - toon_post
+  - toon_read
+  - toon_status
+provides_hooks: []
+provides_middleware: []
