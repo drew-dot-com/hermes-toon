@@ -171,7 +171,11 @@ def vm(tmp_path):
     fake.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
-        f"open({str(log)!r}, 'a').write(json.dumps({{'argv': sys.argv[1:], "
+        "a = sys.argv[1:]\n"
+        "py = a[a.index('--python') + 1] if '--python' in a else None\n"
+        "script = open(py, encoding='utf-8').read() if py else None\n"
+        "mode = oct(os.stat(py).st_mode & 0o777) if py else None\n"
+        f"open({str(log)!r}, 'a').write(json.dumps({{'argv': a, 'script': script, 'mode': mode, "
         "'pass': os.environ.get('TOON_PASSPHRASE_FILE'), 'env': sorted(os.environ)}) + '\\n')\n"
         f"if os.path.exists({str(tmp_path / 'fail')!r}):\n"
         "    sys.stderr.write('boom\\n'); sys.exit(1)\n"
@@ -320,3 +324,141 @@ def test_bridge_hands_charter_a_minimal_env(vm):
     env = set(call["env"]) - {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}  # added by macOS / Python at exec
     assert env == {"PATH", "HOME", "TOON_PASSPHRASE_FILE"}, env
     assert call["pass"] == f"{vm['home']}/secrets/passphrase"
+
+
+# ---------- python job: exactly one of urls and script, the script is checked, stdout comes back ----------
+
+SCRIPT = "import numpy as np\nprint(np.pi)\n"
+PY_OUT = {"kind": "python", "exitCode": 0, "signal": None, "timedOut": False, "seconds": 1.2,
+          "stdout": "3.14159\n", "stderr": "", "stdoutTruncated": False, "stderrTruncated": False}
+
+
+def test_schema_offers_urls_or_script_and_requires_neither():
+    props = tools.RENT_SCHEMA["parameters"]["properties"]
+    assert set(props) == {"urls", "script"}
+    assert "required" not in tools.RENT_SCHEMA["parameters"]
+    assert "\u2014" not in json.dumps(tools.RENT_SCHEMA, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("platform,user_id", [("telegram", "999"), ("", ""), ("discord", "111")])
+def test_script_from_a_caller_not_allowed_is_refused_without_a_bridge_call(monkeypatch, platform, user_id):
+    as_session(monkeypatch, platform, user_id)
+    no_bridge(monkeypatch)
+    assert "refused" in json.loads(tools.charter_rent({"script": SCRIPT}))["error"]
+
+
+def test_allowed_caller_reaches_the_bridge_with_the_script(monkeypatch):
+    as_session(monkeypatch, "telegram", "111")
+    seen = {}
+
+    def fake(command, stdin=None, timeout=0):
+        seen["call"] = (command, stdin)
+        return {"leaseId": "L2", "state": "done", "paidIntervals": 1, "spent": "6500", "output": PY_OUT}
+
+    monkeypatch.setattr(tools, "bridge", fake)
+    out = json.loads(tools.charter_rent({"script": SCRIPT}))
+    assert seen["call"] == ("rent", {"script": SCRIPT})
+    assert out == {"leaseId": "L2", "state": "done", "paidIntervals": 1, "spent": "6500",
+                   "python": {k: v for k, v in PY_OUT.items() if k != "kind"}}
+
+
+@pytest.mark.parametrize("args", [
+    {"urls": URLS, "script": SCRIPT}, {}, {"urls": None, "script": None},
+    {"script": ""}, {"script": "  \n\t"}, {"script": "print(1)\0"}, {"script": 42}, {"script": ["print(1)"]},
+    {"script": "x" * (8 * 1024 + 1)}, {"script": "é" * 4097}, {"script": "print('\ud800')"},
+])
+def test_bad_jobs_are_rejected_before_the_bridge(monkeypatch, args):
+    as_session(monkeypatch, "telegram", "111")
+    no_bridge(monkeypatch)
+    assert "error" in json.loads(tools.charter_rent(args))
+
+
+def test_a_script_of_exactly_8_kib_is_taken(monkeypatch):
+    as_session(monkeypatch, "telegram", "111")
+    seen = []
+    monkeypatch.setattr(tools, "bridge", lambda c, stdin=None, **k: seen.append(stdin) or {"output": PY_OUT})
+    script = "#" + "é" * 4095 + "\n"  # 1 + 8190 + 1 bytes
+    assert len(script.encode()) == 8192
+    assert "error" not in json.loads(tools.charter_rent({"script": script}))
+    assert seen == [{"script": script}]
+
+
+def test_python_output_is_cut_and_marked_truncated(monkeypatch):
+    as_session(monkeypatch, "telegram", "111")
+    big = {**PY_OUT, "exitCode": 1, "stdout": "o" * 9000, "stderr": "e" * 9000, "stderrTruncated": True}
+    monkeypatch.setattr(tools, "bridge", lambda *a, **k: {"leaseId": "L", "state": "done", "output": big})
+    py = json.loads(tools.charter_rent({"script": SCRIPT}))["python"]
+    assert (len(py["stdout"]), len(py["stderr"])) == (4096, 2048)
+    assert py["stdoutTruncated"] is True and py["stderrTruncated"] is True
+    assert py["exitCode"] == 1
+
+
+def test_python_lease_without_python_output_says_so(monkeypatch):
+    as_session(monkeypatch, "telegram", "111")
+    for output in (None, {"pages": []}, "junk"):
+        answer = {"leaseId": "L", "state": "failed", "output": output}
+        monkeypatch.setattr(tools, "bridge", lambda *a, r=answer, **k: r)
+        assert json.loads(tools.charter_rent({"script": SCRIPT}))["python"] is None
+    monkeypatch.setattr(tools, "bridge", lambda *a, **k: {"error": "today's cap of 5 leases is reached"})
+    assert "cap" in json.loads(tools.charter_rent({"script": SCRIPT}))["error"]
+
+
+def test_bridge_runs_charter_with_the_script_in_a_private_temp_file(vm):
+    done = run_bridge(vm, "rent", stdin={"script": SCRIPT})
+    assert done.returncode == 0, done.stderr
+    (call,) = calls(vm)
+    argv = call["argv"]
+    path = argv[argv.index("--python") + 1]
+    assert argv == ["rent", "--offer", "a" * 64 + ":gpu1", "--python", path,
+                    "--max-intervals", "6", "--relay", "wss://relay.example/", "--json"]
+    assert "--urls" not in argv
+    assert call["script"] == SCRIPT
+    assert call["mode"] == "0o600"
+    assert Path(path).parent == vm["home"] / ".charter-bridge"
+    assert not Path(path).exists(), "the temp file is removed after charter runs"
+
+
+def test_bridge_removes_the_script_when_charter_fails(vm):
+    done = run_bridge(vm, "rent", stdin={"script": SCRIPT}, extra={"FAKE_FAIL": "1"})
+    assert done.returncode != 0
+    assert not list((vm["home"] / ".charter-bridge").glob("script-*"))
+
+
+def test_bridge_script_lease_counts_against_the_same_day_cap(vm):
+    for i in range(5):
+        stdin = {"script": SCRIPT} if i % 2 else {"urls": URLS}
+        assert run_bridge(vm, "rent", stdin=stdin).returncode == 0
+    sixth = run_bridge(vm, "rent", stdin={"script": SCRIPT})
+    assert sixth.returncode == 3
+    assert "cap of 5" in json.loads(sixth.stdout)["error"]
+    assert len(calls(vm)) == 5
+
+
+def test_bridge_takes_a_worst_case_escaped_8_kib_script(vm):
+    script = "#" + "\x01" * 8190 + "\n"  # each \x01 is six bytes of JSON
+    done = run_bridge(vm, "rent", stdin={"script": script})
+    assert done.returncode == 0, done.stdout
+    assert calls(vm)[0]["script"] == script
+
+
+@pytest.mark.parametrize("stdin", [
+    {"urls": URLS, "script": SCRIPT}, {"script": ""}, {"script": " \n"}, {"script": "print(1)\0"},
+    {"script": 7}, {"script": None}, {"script": "x" * 8193}, {"script": "é" * 4097},
+    {"script": "print('\ud800')"}, {"urls": None},
+])
+def test_bridge_rejects_bad_scripts_without_spending_a_lease(vm, stdin):
+    done = run_bridge(vm, "rent", stdin=stdin)
+    assert done.returncode != 0
+    assert "error" in json.loads(done.stdout)
+    assert calls(vm) == []
+    assert not list((vm["home"] / ".charter-bridge").glob("leases-*"))
+    assert not list((vm["home"] / ".charter-bridge").glob("script-*"))
+
+
+def test_bridge_rejects_oversized_stdin_without_spending_a_lease(vm):
+    env = {"PATH": os.environ["PATH"], "HOME": str(vm["home"]), "CHARTER_BIN": str(vm["fake"])}
+    done = subprocess.run([sys.executable, str(BRIDGE), "rent"], input='{"script": "' + "x" * 70000 + '"}',
+                          capture_output=True, text=True, timeout=30, env=env)
+    assert done.returncode != 0
+    assert "error" in json.loads(done.stdout)
+    assert calls(vm) == []
