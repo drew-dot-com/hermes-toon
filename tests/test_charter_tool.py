@@ -172,19 +172,24 @@ def vm(tmp_path):
         "#!/usr/bin/env python3\n"
         "import json, os, sys\n"
         f"open({str(log)!r}, 'a').write(json.dumps({{'argv': sys.argv[1:], "
-        "'pass': os.environ.get('TOON_PASSPHRASE_FILE')}) + '\\n')\n"
-        "if os.environ.get('FAKE_FAIL'):\n"
+        "'pass': os.environ.get('TOON_PASSPHRASE_FILE'), 'env': sorted(os.environ)}) + '\\n')\n"
+        f"if os.path.exists({str(tmp_path / 'fail')!r}):\n"
         "    sys.stderr.write('boom\\n'); sys.exit(1)\n"
         "print(json.dumps({'leaseId': 'L1', 'state': 'closed', 'paidIntervals': 1, 'spent': '6000',\n"
         " 'output': {'pages': [{'url': 'https://example.com/a', 'text': 'hi', 'jpegBase64': 'AA'}]}}))\n"
     )
     fake.chmod(0o755)
-    return {"home": home, "fake": fake, "log": log}
+    return {"home": home, "fake": fake, "log": log, "fail": tmp_path / "fail"}
 
 
 def run_bridge(vm, *argv, stdin=None, extra=None):
-    env = {"PATH": os.environ["PATH"], "HOME": str(vm["home"]), "CHARTER_BIN": str(vm["fake"]),
-           **(extra or {})}
+    extra = dict(extra or {})
+    # charter gets a minimal env, so the fake is told to fail by a file, not by a variable.
+    if extra.pop("FAKE_FAIL", None):
+        vm["fail"].touch()
+    else:
+        vm["fail"].unlink(missing_ok=True)
+    env = {"PATH": os.environ["PATH"], "HOME": str(vm["home"]), "CHARTER_BIN": str(vm["fake"]), **extra}
     return subprocess.run([sys.executable, str(BRIDGE), *argv],
                           input=json.dumps(stdin if stdin is not None else {"urls": URLS}),
                           capture_output=True, text=True, env=env, timeout=30)
@@ -259,3 +264,59 @@ def test_bridge_needs_its_env_file_and_never_prints_secrets(vm):
     assert missing.returncode != 0
     assert "bridge.env" in json.loads(missing.stdout)["error"]
     assert "do-not-print-me" not in missing.stdout + missing.stderr
+
+
+# ---------- final review F-I6: the day counter fails closed, the cap is fixed, charter gets a minimal env ----------
+
+
+def counter(vm):
+    return vm["home"] / f".charter-bridge/leases-{datetime.now(UTC).strftime('%Y-%m-%d')}"
+
+
+@pytest.mark.parametrize("content", ["garbage\n", "", "-1\n", "3 4\n", "\x00\x01"])
+def test_bridge_treats_a_corrupt_day_counter_as_the_cap_reached(vm, content):
+    counter(vm).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    counter(vm).write_text(content)
+    done = run_bridge(vm, "rent")
+    assert done.returncode == 3
+    assert "cap" in json.loads(done.stdout)["error"]
+    assert calls(vm) == []
+    assert counter(vm).read_text() == content, "a counter it cannot read is left as it was"
+
+
+def test_bridge_treats_an_unreadable_day_counter_as_the_cap_reached(vm):
+    counter(vm).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    counter(vm).write_text("1\n")
+    counter(vm).chmod(0o000)
+    try:
+        done = run_bridge(vm, "rent")
+    finally:
+        counter(vm).chmod(0o600)
+    assert done.returncode == 3
+    assert "cap" in json.loads(done.stdout)["error"]
+    assert calls(vm) == []
+
+
+def test_bridge_writes_the_counter_whole_through_a_temp_file(vm):
+    for n in (1, 2):
+        assert run_bridge(vm, "rent").returncode == 0
+        assert counter(vm).read_text() == f"{n}\n"
+    left = sorted(p.name for p in counter(vm).parent.iterdir())
+    assert left == ["lease.lock", counter(vm).name], left
+
+
+def test_bridge_cap_is_a_constant_not_read_from_env(vm):
+    for _ in range(5):
+        assert run_bridge(vm, "rent", extra={"CHARTER_BRIDGE_MAX_LEASES": "100"}).returncode == 0
+    sixth = run_bridge(vm, "rent", extra={"CHARTER_BRIDGE_MAX_LEASES": "100"})
+    assert sixth.returncode == 3
+    assert "cap of 5" in json.loads(sixth.stdout)["error"]
+
+
+def test_bridge_hands_charter_a_minimal_env(vm):
+    done = run_bridge(vm, "rent", extra={"SOME_SECRET_TOKEN": "x", "NODE_OPTIONS": "--require /tmp/evil.js"})
+    assert done.returncode == 0, done.stderr
+    (call,) = calls(vm)
+    env = set(call["env"]) - {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}  # added by macOS / Python at exec
+    assert env == {"PATH", "HOME", "TOON_PASSPHRASE_FILE"}, env
+    assert call["pass"] == f"{vm['home']}/secrets/passphrase"

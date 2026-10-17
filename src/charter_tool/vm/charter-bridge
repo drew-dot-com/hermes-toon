@@ -10,6 +10,7 @@ chat user writes is ever parsed by a shell.
          it and print charter's JSON {leaseId, state, paidIntervals, spent, output?}.
          1 to 5 http(s) URLs. At most MAX_LEASES leases a UTC day, counted in
          ~/.charter-bridge/leases-<date> BEFORE charter runs, so a crash cannot bypass the cap.
+         A counter that cannot be read, or holds anything but a count, counts as the cap reached.
 
 Only `rent` exists. Everything else charter can do (offers, status, wallet) is not reachable.
 
@@ -18,6 +19,7 @@ Settings come from ~/.config/charter/bridge.env, one KEY=VALUE per line, three k
   CHARTER_OFFER_ID      <host pubkey>:<offer id>
   CHARTER_RELAY_URL     wss:// relay that carries the offers
 The spending itself is bounded again by --max-intervals here and by the node's own limit.
+charter runs with PATH, HOME and TOON_PASSPHRASE_FILE only, never the caller's whole environment.
 """
 import fcntl
 import json
@@ -30,7 +32,7 @@ from pathlib import Path
 
 HOME = Path(os.environ.get("HOME", "~")).expanduser()
 CHARTER = os.environ.get("CHARTER_BIN", str(HOME / ".local/bin/charter"))
-MAX_LEASES = int(os.environ.get("CHARTER_BRIDGE_MAX_LEASES", "5"))
+MAX_LEASES = 5  # a constant: nothing in the environment can raise it
 MAX_INTERVALS = 6
 MAX_URLS = 5
 MAX_URL_CHARS = 2048
@@ -39,6 +41,7 @@ STATE = HOME / ".charter-bridge"
 ENV_FILE = HOME / ".config/charter/bridge.env"
 ENV_KEYS = ("TOON_PASSPHRASE_FILE", "CHARTER_OFFER_ID", "CHARTER_RELAY_URL")
 URL = re.compile(r"https?://[\x21-\x7e]+")  # printable ASCII, no spaces; commas are checked apart
+COUNT = re.compile(r"\d{1,6}\n?")
 
 
 def fail(message, code=2):
@@ -76,29 +79,43 @@ def read_urls():
 
 
 def count_lease():
-    """Take one of today's leases or exit. Counted and flushed before charter is started."""
+    """Take one of today's leases or exit. Counted and flushed before charter is started.
+
+    The count is read under the lock and replaced whole (temp file, fsync, os.replace), so a crash
+    leaves the old count or the new one. A counter that is missing is 0; one that cannot be read or
+    holds anything else counts as the cap reached, so a damaged file can never reset the cap.
+    """
     STATE.mkdir(mode=0o700, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     path = STATE / f"leases-{today}"
     with open(STATE / "lease.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            count = int(path.read_text().strip() or 0)
-        except (OSError, ValueError):
+            text = path.read_text()
+            count = int(text) if COUNT.fullmatch(text) else None
+        except FileNotFoundError:
             count = 0
+        except (OSError, ValueError):
+            count = None
+        if count is None:
+            fail(f"today's lease count is unreadable, so the cap of {MAX_LEASES} leases counts as reached", 3)
         if count >= MAX_LEASES:
             fail(f"today's cap of {MAX_LEASES} leases is reached", 3)
-        with open(path, "w") as out:
+        tmp = STATE / f".leases-{today}.tmp"
+        with open(tmp, "w") as out:
             out.write(f"{count + 1}\n")
             out.flush()
             os.fsync(out.fileno())
+        os.replace(tmp, path)
 
 
 def rent():
     urls = read_urls()
     settings = read_env()
     count_lease()
-    env = {**os.environ, "TOON_PASSPHRASE_FILE": settings["TOON_PASSPHRASE_FILE"]}
+    # Only what charter and the toon binary it runs need: nothing a caller set can reach them.
+    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": str(HOME),
+           "TOON_PASSPHRASE_FILE": settings["TOON_PASSPHRASE_FILE"]}
     argv = [CHARTER, "rent", "--offer", settings["CHARTER_OFFER_ID"], "--urls", ",".join(urls),
             "--max-intervals", str(MAX_INTERVALS), "--relay", settings["CHARTER_RELAY_URL"], "--json"]
     try:
