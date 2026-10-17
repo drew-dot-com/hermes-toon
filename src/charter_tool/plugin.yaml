@@ -1,0 +1,17 @@
+name: charter-tool
+version: "0.1.0"
+description: >-
+  charter_rent rents one short Charter lease (a hidden host runs a fixed fetch job for the
+  URLs a user gives) and returns the page texts. Only the ids listed in CHARTER_ALLOWED_IDS
+  may call it, and any other caller is refused before anything is run or paid.
+  Disclosure: every call spends real USDC from the node's wallet (an opening fee of 0.001
+  plus up to six ticks of 0.005), capped by charter-bridge (5 leases a UTC day, 6 intervals
+  each) and by the node's own spending limit, which this plugin never touches.
+author: Drew Pierson
+kind: backend
+requires_hermes: ">=0.21.3"
+python_dependencies: []
+provides_tools:
+  - charter_rent
+provides_hooks: []
+provides_middleware: []

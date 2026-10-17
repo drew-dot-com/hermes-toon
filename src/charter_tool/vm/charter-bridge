@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""charter-bridge: the only door from a Hermes agent into the charter CLI.
+
+Runs inside the VM that holds the node and its wallet. A caller outside reaches it as
+  limactl shell <vm> -- bash -lc '~/bin/charter-bridge rent'
+and passes anything user-supplied as JSON on stdin, never as an argument, so nothing a
+chat user writes is ever parsed by a shell.
+
+  rent   stdin {"urls": ["https://...", ...]}: rent one Charter lease, fetch the pages in
+         it and print charter's JSON {leaseId, state, paidIntervals, spent, output?}.
+         1 to 5 http(s) URLs. At most MAX_LEASES leases a UTC day, counted in
+         ~/.charter-bridge/leases-<date> BEFORE charter runs, so a crash cannot bypass the cap.
+
+Only `rent` exists. Everything else charter can do (offers, status, wallet) is not reachable.
+
+Settings come from ~/.config/charter/bridge.env, one KEY=VALUE per line, three keys only:
+  TOON_PASSPHRASE_FILE  file holding the wallet passphrase; handed to charter, never printed
+  CHARTER_OFFER_ID      <host pubkey>:<offer id>
+  CHARTER_RELAY_URL     wss:// relay that carries the offers
+The spending itself is bounded again by --max-intervals here and by the node's own limit.
+"""
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOME = Path(os.environ.get("HOME", "~")).expanduser()
+CHARTER = os.environ.get("CHARTER_BIN", str(HOME / ".local/bin/charter"))
+MAX_LEASES = int(os.environ.get("CHARTER_BRIDGE_MAX_LEASES", "5"))
+MAX_INTERVALS = 6
+MAX_URLS = 5
+MAX_URL_CHARS = 2048
+RUN_SECONDS = 540
+STATE = HOME / ".charter-bridge"
+ENV_FILE = HOME / ".config/charter/bridge.env"
+ENV_KEYS = ("TOON_PASSPHRASE_FILE", "CHARTER_OFFER_ID", "CHARTER_RELAY_URL")
+URL = re.compile(r"https?://[\x21-\x7e]+")  # printable ASCII, no spaces; commas are checked apart
+
+
+def fail(message, code=2):
+    print(json.dumps({"error": message}))
+    sys.exit(code)
+
+
+def read_env():
+    try:
+        lines = ENV_FILE.read_text().splitlines()
+    except OSError:
+        fail(f"cannot read {ENV_FILE}", 1)
+    found = {}
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep and key.strip() in ENV_KEYS:
+            found[key.strip()] = value.strip().strip("'\"")
+    missing = [k for k in ENV_KEYS if not found.get(k)]
+    if missing:
+        fail(f"{ENV_FILE} lacks {', '.join(missing)}", 1)
+    return found
+
+
+def read_urls():
+    try:
+        urls = json.loads(sys.stdin.read(16384)).get("urls")
+    except (ValueError, AttributeError):
+        urls = None
+    if not isinstance(urls, list) or not 1 <= len(urls) <= MAX_URLS:
+        fail(f'stdin needs {{"urls": [1 to {MAX_URLS} http(s) URLs]}}')
+    for u in urls:
+        if not (isinstance(u, str) and len(u) <= MAX_URL_CHARS and URL.fullmatch(u) and "," not in u):
+            fail("every url must be a plain http(s) URL without spaces or commas")
+    return urls
+
+
+def count_lease():
+    """Take one of today's leases or exit. Counted and flushed before charter is started."""
+    STATE.mkdir(mode=0o700, exist_ok=True)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    path = STATE / f"leases-{today}"
+    with open(STATE / "lease.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            count = int(path.read_text().strip() or 0)
+        except (OSError, ValueError):
+            count = 0
+        if count >= MAX_LEASES:
+            fail(f"today's cap of {MAX_LEASES} leases is reached", 3)
+        with open(path, "w") as out:
+            out.write(f"{count + 1}\n")
+            out.flush()
+            os.fsync(out.fileno())
+
+
+def rent():
+    urls = read_urls()
+    settings = read_env()
+    count_lease()
+    env = {**os.environ, "TOON_PASSPHRASE_FILE": settings["TOON_PASSPHRASE_FILE"]}
+    argv = [CHARTER, "rent", "--offer", settings["CHARTER_OFFER_ID"], "--urls", ",".join(urls),
+            "--max-intervals", str(MAX_INTERVALS), "--relay", settings["CHARTER_RELAY_URL"], "--json"]
+    try:
+        done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=RUN_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        fail(f"charter did not finish: {type(error).__name__}", 1)
+    lines = done.stdout.strip().splitlines()
+    try:
+        result = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        tail = done.stderr.strip().splitlines()[-1:] or ["charter printed nothing"]
+        fail(f"charter failed: {tail[0][-300:]}", 1)
+    print(json.dumps(result, separators=(",", ":")))
+    sys.exit(done.returncode)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["rent"]:
+        rent()
+    fail("usage: charter-bridge rent")
