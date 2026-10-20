@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""charter-bridge: the only door from a Hermes agent into the charter CLI.
+
+Runs inside the VM that holds the node and its wallet. A caller outside reaches it as
+  limactl shell <vm> -- bash -lc '~/bin/charter-bridge rent'
+and passes anything user-supplied as JSON on stdin, never as an argument, so nothing a
+chat user writes is ever parsed by a shell.
+
+  rent   stdin {"urls": ["https://...", ...]} or {"script": "<python source>"}, exactly one:
+         rent one Charter lease, run the fetch or the python job in it and print charter's JSON
+         {leaseId, state, paidIntervals, spent, output?}. 1 to 5 http(s) URLs, or a non-blank
+         script of at most 8 KiB of UTF-8 with no NUL, which the bridge writes to a private
+         temp file for `charter rent --python` and removes after. At most MAX_LEASES leases a UTC day, counted in
+         ~/.charter-bridge/leases-<date> BEFORE charter runs, so a crash cannot bypass the cap.
+         A counter that cannot be read, or holds anything but a count, counts as the cap reached.
+
+Only `rent` exists. Everything else charter can do (offers, status, wallet) is not reachable.
+
+Settings come from ~/.config/charter/bridge.env, one KEY=VALUE per line, three keys only:
+  TOON_PASSPHRASE_FILE  file holding the wallet passphrase; handed to charter, never printed
+  CHARTER_OFFER_ID      <host pubkey>:<offer id>
+  CHARTER_RELAY_URL     wss:// relay that carries the offers
+The spending itself is bounded again by --max-intervals here and by the node's own limit.
+charter runs with PATH, HOME and TOON_PASSPHRASE_FILE only, never the caller's whole environment.
+"""
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOME = Path(os.environ.get("HOME", "~")).expanduser()
+CHARTER = os.environ.get("CHARTER_BIN", str(HOME / ".local/bin/charter"))
+MAX_LEASES = 5  # a constant: nothing in the environment can raise it
+MAX_INTERVALS = 6
+MAX_URLS = 5
+MAX_URL_CHARS = 2048
+MAX_SCRIPT_BYTES = 8 * 1024  # charter's own limit
+MAX_STDIN = 65536  # an 8 KiB script JSON-escaped at worst (\u0001 for each byte) is 48 KiB
+RUN_SECONDS = 540
+STATE = HOME / ".charter-bridge"
+ENV_FILE = HOME / ".config/charter/bridge.env"
+ENV_KEYS = ("TOON_PASSPHRASE_FILE", "CHARTER_OFFER_ID", "CHARTER_RELAY_URL")
+URL = re.compile(r"https?://[\x21-\x7e]+")  # printable ASCII, no spaces; commas are checked apart
+COUNT = re.compile(r"\d{1,6}\n?")
+
+
+def fail(message, code=2):
+    print(json.dumps({"error": message}))
+    sys.exit(code)
+
+
+def read_env():
+    try:
+        lines = ENV_FILE.read_text().splitlines()
+    except OSError:
+        fail(f"cannot read {ENV_FILE}", 1)
+    found = {}
+    for line in lines:
+        key, sep, value = line.partition("=")
+        if sep and key.strip() in ENV_KEYS:
+            found[key.strip()] = value.strip().strip("'\"")
+    missing = [k for k in ENV_KEYS if not found.get(k)]
+    if missing:
+        fail(f"{ENV_FILE} lacks {', '.join(missing)}", 1)
+    return found
+
+
+def valid_script(script):
+    if not isinstance(script, str) or not script.strip() or "\0" in script:
+        return False
+    try:
+        return len(script.encode("utf-8")) <= MAX_SCRIPT_BYTES
+    except UnicodeEncodeError:  # a lone surrogate from a \ud800 escape is not UTF-8
+        return False
+
+
+def read_job():
+    """The job from stdin: ("urls", [...]) or ("script", "..."), exactly one, or exit."""
+    usage = f'stdin needs {{"urls": [1 to {MAX_URLS} http(s) URLs]}} or {{"script": "<python>"}}'
+    raw = sys.stdin.read(MAX_STDIN + 1)
+    if len(raw) > MAX_STDIN:
+        fail(usage)
+    try:
+        job = json.loads(raw)
+    except ValueError:
+        job = None
+    if not isinstance(job, dict) or ("urls" in job) == ("script" in job):
+        fail(usage)
+    if "script" in job:
+        if not valid_script(job["script"]):
+            fail(f"script must be non-blank Python of at most {MAX_SCRIPT_BYTES} bytes of UTF-8, with no NUL")
+        return "script", job["script"]
+    urls = job["urls"]
+    if not isinstance(urls, list) or not 1 <= len(urls) <= MAX_URLS:
+        fail(usage)
+    for u in urls:
+        if not (isinstance(u, str) and len(u) <= MAX_URL_CHARS and URL.fullmatch(u) and "," not in u):
+            fail("every url must be a plain http(s) URL without spaces or commas")
+    return "urls", urls
+
+
+def count_lease():
+    """Take one of today's leases or exit. Counted and flushed before charter is started.
+
+    The count is read under the lock and replaced whole (temp file, fsync, os.replace), so a crash
+    leaves the old count or the new one. A counter that is missing is 0; one that cannot be read or
+    holds anything else counts as the cap reached, so a damaged file can never reset the cap.
+    """
+    STATE.mkdir(mode=0o700, exist_ok=True)
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    path = STATE / f"leases-{today}"
+    with open(STATE / "lease.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            text = path.read_text()
+            count = int(text) if COUNT.fullmatch(text) else None
+        except FileNotFoundError:
+            count = 0
+        except (OSError, ValueError):
+            count = None
+        if count is None:
+            fail(f"today's lease count is unreadable, so the cap of {MAX_LEASES} leases counts as reached", 3)
+        if count >= MAX_LEASES:
+            fail(f"today's cap of {MAX_LEASES} leases is reached", 3)
+        tmp = STATE / f".leases-{today}.tmp"
+        with open(tmp, "w") as out:
+            out.write(f"{count + 1}\n")
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path)
+
+
+def write_script(script):
+    """The script in a fresh 0600 file under STATE, which only this user can read."""
+    fd, path = tempfile.mkstemp(prefix="script-", suffix=".py", dir=STATE)
+    with os.fdopen(fd, "w", encoding="utf-8") as out:
+        out.write(script)
+    return path
+
+
+def rent():
+    kind, value = read_job()
+    settings = read_env()
+    count_lease()
+    # Only what charter and the toon binary it runs need: nothing a caller set can reach them.
+    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": str(HOME),
+           "TOON_PASSPHRASE_FILE": settings["TOON_PASSPHRASE_FILE"]}
+    script = write_script(value) if kind == "script" else None
+    job = ["--python", script] if script else ["--urls", ",".join(value)]
+    argv = [CHARTER, "rent", "--offer", settings["CHARTER_OFFER_ID"], *job,
+            "--max-intervals", str(MAX_INTERVALS), "--relay", settings["CHARTER_RELAY_URL"], "--json"]
+    try:
+        done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=RUN_SECONDS)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        fail(f"charter did not finish: {type(error).__name__}", 1)
+    finally:
+        if script:
+            os.unlink(script)
+    lines = done.stdout.strip().splitlines()
+    try:
+        result = json.loads(lines[-1]) if lines else None
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        tail = done.stderr.strip().splitlines()[-1:] or ["charter printed nothing"]
+        fail(f"charter failed: {tail[0][-300:]}", 1)
+    print(json.dumps(result, separators=(",", ":")))
+    sys.exit(done.returncode)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["rent"]:
+        rent()
+    fail("usage: charter-bridge rent")
