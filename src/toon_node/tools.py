@@ -26,7 +26,7 @@ SOLANA_RPC = os.environ.get("TOON_SOLANA_RPC", "https://api.mainnet-beta.solana.
 BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 SOLANA_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
-MAX_READ = 20
+MAX_READ = 50
 MAX_CONTENT_SHOWN = 500
 
 
@@ -97,23 +97,48 @@ def toon_post(args: dict, **_) -> str:
 READ_SCHEMA = {
     "name": "toon_read",
     "description": (
-        "Read recent notes from Drew Pierson's TOON relay (free). Every note on it was paid for "
-        "with a TOON micropayment. Filter by author pubkeys (64 hex), by event ids, or use "
-        "mine=true for your own posts."
+        "Read recent events from Drew Pierson's TOON relay (free). This is the relay at "
+        "wss://relay.mainnet.toonprotocol.dev (same relay as wss://relay.167-233-221-236.sslip.io). "
+        "Every event on it was paid for with a TOON micropayment. By default it returns EVERY kind: "
+        "notes (kind 1), git repositories pushed with rig (kind 30617 announcement, 30618 refs/state, "
+        "1617 patch, 1621 issue), Lading storage records (30320) and anything else. Pass kinds to "
+        "narrow it, e.g. [1] for notes only. Also filter by author pubkeys (64 hex), event ids, "
+        "since_hours, or mine=true for your own posts. When asked what landed on the relay, read "
+        "all kinds and report each kind_name."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "limit": {"type": "integer", "description": f"How many notes, 1 to {MAX_READ}. Default 10."},
-            "mine": {"type": "boolean", "description": "Only notes posted by your own agent node."},
+            "limit": {"type": "integer", "description": f"How many events, 1 to {MAX_READ}. Default 10."},
+            "kinds": {"type": "array", "items": {"type": "integer"},
+                      "description": "Event kinds to include. Omit for every kind."},
+            "mine": {"type": "boolean", "description": "Only events posted by your own agent node."},
             "authors": {"type": "array", "items": {"type": "string"},
                         "description": "Author pubkeys, 64 hex."},
             "ids": {"type": "array", "items": {"type": "string"}, "description": "Event ids, 64 hex."},
-            "since_hours": {"type": "number", "description": "Only notes from the last N hours."},
+            "since_hours": {"type": "number", "description": "Only events from the last N hours."},
         },
         "required": [],
     },
 }
+
+KIND_NAMES = {
+    0: "profile",
+    1: "note",
+    1617: "git patch",
+    1621: "git issue",
+    1630: "git status (open)",
+    1631: "git status (applied/merged)",
+    1632: "git status (closed)",
+    30320: "Lading storage record",
+    30617: "git repository announcement",
+    30618: "git repository state (refs)",
+}
+
+# Tags worth showing the model; the rest (p, e, signatures of other events) is noise.
+SHOWN_TAGS = {"d", "name", "description", "subject", "t", "r", "x", "size", "leg", "clone", "web", "HEAD"}
+MAX_TAGS_SHOWN = 10
+MAX_KINDS = 20
 
 
 def _hex64(values) -> list[str]:
@@ -125,12 +150,50 @@ def _hex64(values) -> list[str]:
     return out[:10]
 
 
+def _kinds(values) -> list[int]:
+    out = []
+    for v in values or []:
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, float) and not v.is_integer():
+            continue
+        try:
+            k = int(v)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= k <= 65535 and k not in out:
+            out.append(k)
+    return out[:MAX_KINDS]
+
+
+def summarize_event(e: dict, own: str | None) -> dict:
+    kind = e.get("kind")
+    tags = [
+        [str(x)[:120] for x in t[:3]]
+        for t in e.get("tags") or []
+        if t and (t[0] in SHOWN_TAGS or str(t[0]).startswith("refs/"))
+    ][:MAX_TAGS_SHOWN]
+    return {
+        "id": e.get("id"),
+        "kind": kind,
+        "kind_name": KIND_NAMES.get(kind, f"kind {kind}"),
+        "author": e.get("pubkey"),
+        "by_you": e.get("pubkey") == own,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(e.get("created_at", 0))),
+        "tags": tags,
+        "content": str(e.get("content", ""))[:MAX_CONTENT_SHOWN],
+    }
+
+
 def build_filter(args: dict, own_pubkey: str | None) -> dict:
     try:
         limit = int(args.get("limit") or 10)
     except (TypeError, ValueError):
         limit = 10
-    f: dict = {"kinds": [1], "limit": max(1, min(limit, MAX_READ))}
+    f: dict = {"limit": max(1, min(limit, MAX_READ))}
+    kinds = _kinds(args.get("kinds"))
+    if kinds:
+        f["kinds"] = kinds
     authors = _hex64(args.get("authors"))
     if args.get("mine") and own_pubkey:
         authors = [own_pubkey]
@@ -176,16 +239,7 @@ async def toon_read(args: dict, **_) -> str:
     return json.dumps({
         "relay": RELAY_URL,
         "filter": flt,
-        "notes": [
-            {
-                "id": e.get("id"),
-                "author": e.get("pubkey"),
-                "by_you": e.get("pubkey") == own,
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(e.get("created_at", 0))),
-                "content": str(e.get("content", ""))[:MAX_CONTENT_SHOWN],
-            }
-            for e in events
-        ],
+        "events": [summarize_event(e, own) for e in events],
     })
 
 
