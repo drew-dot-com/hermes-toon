@@ -36,7 +36,26 @@ def test_manifest_lists_exactly_the_registered_tools():
 
 def test_read_filter_is_bounded_and_drops_bad_ids():
     f = tools.build_filter({"limit": 500, "authors": ["zz", "a" * 64], "ids": ["b" * 63]}, None)
-    assert f == {"kinds": [1], "limit": 20, "authors": ["a" * 64]}
+    assert f == {"limit": tools.MAX_READ, "authors": ["a" * 64]}
+
+
+def test_read_defaults_to_every_kind():
+    # A rig push lands as kind 30617/30618, not kind 1; a kind-1-only read missed it (10-20).
+    assert "kinds" not in tools.build_filter({}, None)
+
+
+def test_read_kinds_are_whole_numbers_only():
+    f = tools.build_filter({"kinds": [1, "30617", "x", -2, 1.5, 70000]}, None)
+    assert f["kinds"] == [1, 30617]
+
+
+def test_event_summary_names_the_kind_and_keeps_useful_tags():
+    e = {"id": "i", "pubkey": "p", "kind": 30618, "created_at": 0, "content": "",
+         "tags": [["d", "toon_cli"], ["refs/heads/main", "abc"], ["p", "x" * 64]]}
+    s = tools.summarize_event(e, None)
+    assert s["kind"] == 30618
+    assert "git" in s["kind_name"]
+    assert s["tags"] == [["d", "toon_cli"], ["refs/heads/main", "abc"]]
 
 
 def test_mine_uses_the_node_pubkey():
