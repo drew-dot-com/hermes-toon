@@ -1,0 +1,31 @@
+# Draft of plugin-catalog/charter-tool.yaml for NousResearch/hermes-agent.
+# The sha is a placeholder until the hermes-toon PR that ships charter-tool 0.3.0 is merged:
+# replace it with the full 40-character sha of the merge commit on main, then open the catalog
+# PR from a fork (rule 4: pins are exact; rule 5: submitted by the repo owner).
+name: charter-tool
+repo: https://github.com/drew-dot-com/hermes-toon
+sha: REPLACE_WITH_THE_40_HEX_SHA_OF_HERMES_TOON_MAIN_AFTER_MERGE
+version: "0.3.0"
+subdir: src/charter_tool
+description: >-
+  Rent compute on Charter (charter.mainnet.toonprotocol.dev) from the agent's own toon node:
+  charter_rent rents one short lease and runs one job in it, a fetch of 1 to 5 URLs or a Python 3
+  script of at most 8 KiB with no network, and returns the output with what the call spent.
+  Disclosure: every call spends real USDC from the operator's toon node wallet with no per-call
+  confirmation, 0.001 USDC to open plus 0.005 USDC per 30 second interval (at most 0.031 USDC per
+  call at the default cap of 6 intervals, 5 leases a day); CHARTER_MAX_INTERVALS and
+  CHARTER_DAILY_LEASES are the operator's controls, with CHARTER_ALLOWED_IDS to limit who may call
+  it. The plugin runs the operator's charter CLI (or CHARTER_BRIDGE_CMD) as a subprocess and hands
+  it the TOON_PASSPHRASE_FILE path; it never reads the passphrase or any .env file itself.
+maintainer: drew-dot-com
+tier: community
+category: tools
+requires_hermes: ">=0.21.3"
+docs_url: https://github.com/drew-dot-com/hermes-toon#third-plugin-charter-tool
+platforms: [linux, macos]
+capabilities:
+  provides_tools:
+    - charter_rent
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: []

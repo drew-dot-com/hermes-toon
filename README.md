@@ -145,6 +145,101 @@ hermes plugins install 'https://github.com/drew-dot-com/hermes-toon#src/toon_nod
 and add `toon` to a platform's toolsets. Settings: `TOON_LIMACTL`, `TOON_VM`,
 `TOON_BRIDGE`, `TOON_RELAY_URL`, `TOON_BASE_RPC`, `TOON_SOLANA_RPC`.
 
+## Third plugin: charter-tool
+
+`src/charter_tool` gives an agent one tool, `charter_rent` in toolset `charter`,
+over the operator's own `toon` node: rent one short lease on a
+[Charter](https://github.com/drew-dot-com/charter) compute host and run one
+job in it.
+
+| Job | Pass | What comes back | Cost on the mainnet host |
+| --- | --- | --- | --- |
+| fetch | `urls`: 1 to 5 http(s) URLs | each page's text, cut to 2 KiB | 0.001 USDC to open plus 0.005 USDC per 30 second interval |
+| python | `script`: Python 3, at most 8 KiB, no network, NumPy available | stdout (4 KiB), stderr (2 KiB), exit code | the same |
+
+A lease pays per interval while the job runs, so a call costs the opening fee
+plus one tick per interval used, never more than the cap allows: with the
+default cap of 6 intervals that is 0.031 USDC at most. Every answer carries
+`spent` (USDC base units, as `charter` reports it), `spentUsdc` and a `price`
+line stating the schedule and the caps in force, so the agent can tell its user
+what the call cost. Prices are the offer's (an offer lives 45 minutes and the host
+republishes it); `charter offers` shows them.
+
+> **Disclosure.** Each `charter_rent` call spends real USDC from the node
+> wallet with no confirmation per call. The plugin runs the `charter` binary
+> (or your bridge command) as a subprocess with a minimal environment and hands
+> it the path in `TOON_PASSPHRASE_FILE`; it never reads the passphrase itself,
+> and never reads a `.env` file. The caps below and the node's own spending
+> limit are the controls. Fund the node with a small dedicated amount.
+
+### Install
+
+You need, on the machine that runs Hermes, a
+[`toon`](https://github.com/toon-protocol/toon_cli) agent node 0.3 or 0.4
+with a funded wallet (Linux only), and the `charter` CLI built from its repo
+(Node 22 or later; there is no npm package yet):
+
+```sh
+git clone https://github.com/drew-dot-com/charter && cd charter
+npm ci && npm run build && npm install -g --prefix ~/.local .
+charter offers --relay wss://relay.mainnet.toonprotocol.dev
+```
+
+`charter offers` prints each live offer as `<host pubkey>:<offer id>` with its
+prices; that string is your `CHARTER_OFFER_ID`. Then:
+
+```sh
+hermes plugins install 'https://github.com/drew-dot-com/hermes-toon#src/charter_tool'
+hermes plugins enable charter-tool
+```
+
+and add `charter` to a platform's toolsets in `~/.hermes/config.yaml`. The tool
+is offered only when `charter` can be found (or a bridge command is set), so a
+Hermes without either simply does not list it.
+
+### Settings
+
+All optional except the two the `charter` CLI needs. Put them in
+`~/.hermes/.env`; Hermes's profile scope wins over the process environment.
+
+| Variable | Meaning | Default |
+| --- | --- | --- |
+| `TOON_PASSPHRASE_FILE` | file holding the node wallet's passphrase; handed to `charter`, never read here | required without a bridge |
+| `CHARTER_OFFER_ID` | `<host pubkey>:<offer id>` from `charter offers` | required without a bridge |
+| `CHARTER_RELAY_URL` | the relay that carries offers | `wss://relay.mainnet.toonprotocol.dev` |
+| `CHARTER_MAX_INTERVALS` | intervals one call may pay for, 1 to 60 | `6` (0.031 USDC at most per call) |
+| `CHARTER_DAILY_LEASES` | leases a UTC day; `0` refuses every call | `5` |
+| `CHARTER_ALLOWED_IDS` | who may call it, as `platform:user_id` entries, e.g. `telegram:123,discord:456` | empty: everyone Hermes already lets talk to the agent |
+| `CHARTER_BIN` | path to the `charter` binary | `charter` on PATH |
+| `CHARTER_STATE_DIR` | where the day counter and script temp files live | `~/.charter-tool` |
+| `CHARTER_BRIDGE_CMD` | a command that rents on another machine (below) | unset |
+
+A malformed cap refuses every call by variable name. The day counter is taken
+under a file lock and written before `charter` starts, so a crash or a failed
+lease still counts; a counter that cannot be read counts as the cap reached.
+
+### When the node is on another machine
+
+`toon` runs on Linux only, so on a Mac the node and `charter` live in a Lima
+VM. Set `CHARTER_BRIDGE_CMD` to a command line that reaches
+`vm/charter-bridge` there, and the plugin runs it with the job as JSON on stdin
+instead of running `charter` itself:
+
+```
+CHARTER_BRIDGE_CMD=~/.local/lima/bin/limactl shell toon -- bash -lc '~/bin/charter-bridge rent'
+```
+
+The bridge is one script in the VM that takes only `rent`, keeps the
+passphrase file, offer id and relay in its own `~/.config/charter/bridge.env`
+(so `TOON_PASSPHRASE_FILE` and `CHARTER_OFFER_ID` are not needed on the Hermes
+side), caps itself at 6 intervals and 5 leases a day, and hands `charter` a
+minimal environment. The plugin's own day counter applies as well.
+
+**Upgrading from 0.2.0:** the tool is no longer closed to one person. If you
+relied on `CHARTER_ALLOWED_IDS`, keep it set; it works as before. If you used
+the Lima bridge, set `CHARTER_BRIDGE_CMD` as above, since the old
+`TOON_LIMACTL`, `TOON_VM` and `CHARTER_BRIDGE` variables are gone.
+
 ## Development
 
 ```sh
@@ -153,7 +248,10 @@ pytest                       # stubs the Hermes helpers
 HERMES_SRC=/path/to/hermes-agent pytest   # against a real checkout
 ```
 
-`catalog/hermes-toon.yaml` is the proposed Hermes plugin-catalog entry.
+`catalog/hermes-toon.yaml` is the web-toon entry as first proposed to the Hermes
+plugin catalog (listed there as `web-toon` since 2026-10-02); `docs/catalog-entry-draft.yaml`
+is the draft entry for charter-tool, and `docs/charter-tool-design.md` says why 0.3.0 is
+shaped as it is.
 
 ## License
 
