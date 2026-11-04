@@ -15,8 +15,8 @@ returns what the job produced:
   and the exit code come back.
 
 Every call is a real payment from the operator's `toon` node wallet. Prices on the
-Charter mainnet host (v1): 0.001 USDC to open the lease, then 0.005 USDC per 30 second
-interval. The tool's answer carries the actual spend (`spent`, in USDC base units, and
+Charter mainnet host (hourly since 2026-11-04): 0.001 USDC to open the lease, then 0.007 USDC
+per one hour interval. The tool's answer carries the actual spend (`spent`, in USDC base units, and
 `spentUsdc`) and a `price` line stating the schedule and the cap in force, so the agent
 can repeat the cost to its user.
 
@@ -28,7 +28,7 @@ can repeat the cost to its user.
 | the node wallet's passphrase file, handed to `charter` as `TOON_PASSPHRASE_FILE` | `TOON_PASSPHRASE_FILE` | none; required unless a bridge is used |
 | the offer to rent, `<host pubkey>:<offer id>`, found with `charter offers` | `CHARTER_OFFER_ID` | none; required unless a bridge is used |
 | the relay carrying offers | `CHARTER_RELAY_URL` | `wss://relay.mainnet.toonprotocol.dev` |
-| how many 30 second intervals one call may pay for | `CHARTER_MAX_INTERVALS` | 6 (0.031 USDC at most per call); ceiling 60 |
+| how many one hour intervals one call may pay for | `CHARTER_MAX_INTERVALS` | 1 (0.008 USDC at most per call); ceiling 24 |
 | how many leases a UTC day | `CHARTER_DAILY_LEASES` | 5; `0` refuses every call |
 | who may call it | `CHARTER_ALLOWED_IDS`, `platform:user_id` entries | empty: everyone the operator already allows on the platform |
 | where the day counter lives | `CHARTER_STATE_DIR` | `~/.charter-tool` |

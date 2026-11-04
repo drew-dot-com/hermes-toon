@@ -26,11 +26,12 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-# ---------- what one lease costs, as published for the Charter mainnet host (v1 prices) ----------
+# ---------- what one lease costs, as published for the Charter mainnet host (hourly since 2026-11-04) ----------
 
 OPEN_UNITS = 1000  # 0.001 USDC to open a lease
-TICK_UNITS = 5000  # 0.005 USDC per interval
-INTERVAL_SECONDS = 30
+TICK_UNITS = 7000  # 0.007 USDC per interval
+INTERVAL_SECONDS = 3600
+INTERVAL_TEXT = "one hour"  # how the interval reads in a price line
 USDC_DECIMALS = 6
 
 # ---------- limits ----------
@@ -41,8 +42,8 @@ MAX_PAGE_TEXT = 2048
 MAX_SCRIPT_BYTES = 8 * 1024  # charter's own limit (MAX_SCRIPT_BYTES in src/jobs.ts)
 MAX_STDOUT = 4096
 MAX_STDERR = 2048
-DEFAULT_MAX_INTERVALS = 6
-HARD_MAX_INTERVALS = 60  # half an hour, 0.301 USDC; no setting raises it
+DEFAULT_MAX_INTERVALS = 1  # one hour covers any fetch or short script
+HARD_MAX_INTERVALS = 24  # a day, 0.169 USDC; no setting raises it
 DEFAULT_DAILY_LEASES = 5
 DEFAULT_RELAY = "wss://relay.mainnet.toonprotocol.dev"
 BOOT_SECONDS = 120  # a lease boots, ticks, then closes; the timeout follows the interval cap
@@ -282,8 +283,9 @@ def usdc(units) -> str | None:
 
 def price_line(max_intervals: int, daily_leases: int) -> str:
     most = usdc(OPEN_UNITS + TICK_UNITS * max_intervals)
-    return (f"{usdc(OPEN_UNITS)} USDC to open plus {usdc(TICK_UNITS)} USDC per {INTERVAL_SECONDS} second "
-            f"interval, at most {max_intervals} intervals ({most} USDC) per call; "
+    plural = "" if max_intervals == 1 else "s"
+    return (f"{usdc(OPEN_UNITS)} USDC to open plus {usdc(TICK_UNITS)} USDC per {INTERVAL_TEXT} "
+            f"interval, at most {max_intervals} interval{plural} ({most} USDC) per call; "
             f"{daily_leases} leases a day")
 
 
@@ -295,7 +297,7 @@ RENT_SCHEMA = {
         "stderr and exit code come back). Pass exactly one of urls and script. The script runs with "
         "no network, at most 8 KiB of UTF-8, NumPy available; it must print what it wants returned. "
         f"Each call is a real payment from this node's wallet: {usdc(OPEN_UNITS)} USDC to open plus "
-        f"{usdc(TICK_UNITS)} USDC per {INTERVAL_SECONDS} second interval, up to the operator's interval "
+        f"{usdc(TICK_UNITS)} USDC per {INTERVAL_TEXT} interval, up to the operator's interval "
         f"cap (default {DEFAULT_MAX_INTERVALS}, so {usdc(OPEN_UNITS + TICK_UNITS * DEFAULT_MAX_INTERVALS)} "
         f"USDC at most), and at most the operator's daily lease cap (default {DEFAULT_DAILY_LEASES}). "
         "Use it only when the user asks for a page to be fetched or code to be run on a rented machine, "

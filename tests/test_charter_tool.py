@@ -28,7 +28,7 @@ PY_OUT = {"kind": "python", "exitCode": 0, "signal": None, "timedOut": False, "s
           "stdout": "3.14159\n", "stderr": "", "stdoutTruncated": False, "stderrTruncated": False}
 LEASE = {"leaseId": "L1", "state": "closed", "paidIntervals": 2, "spent": "11000",
          "output": {"pages": [{"url": URLS[0], "text": "hello", "jpegBase64": "AAAA"}]}}
-PRICE_6_5 = ("0.001 USDC to open plus 0.005 USDC per 30 second interval, at most 6 intervals (0.031 USDC) "
+PRICE_1_5 = ("0.001 USDC to open plus 0.007 USDC per one hour interval, at most 1 interval (0.008 USDC) "
              "per call; 5 leases a day")
 
 
@@ -108,13 +108,29 @@ def test_manifest_lists_exactly_the_registered_tools_and_the_version():
 def test_schema_is_for_any_operator_and_states_the_prices():
     d = tools.RENT_SCHEMA["description"]
     assert "Drew" not in d and "refuse" not in d
-    assert "0.001 USDC" in d and "0.005 USDC" in d and "30 second" in d
+    assert "0.001 USDC" in d and "0.007 USDC" in d and "one hour" in d
+    assert "0.005" not in d and "30 second" not in d
     props = tools.RENT_SCHEMA["parameters"]["properties"]
     assert set(props) == {"urls", "script"}
     assert "required" not in tools.RENT_SCHEMA["parameters"]
     assert "\u2014" not in json.dumps(tools.RENT_SCHEMA, ensure_ascii=False)
     m = yaml.safe_load((ROOT / "src/charter_tool/plugin.yaml").read_text())
     assert "Drew" not in m["description"] and "0.001 USDC" in m["description"]
+    assert "0.007 USDC" in m["description"] and "0.005" not in m["description"]
+
+
+def test_the_schedule_is_the_live_hosts_hourly_one():
+    # charter.mainnet.toonprotocol.dev sells one hour at 0.007 USDC since 2026-11-04; one hour
+    # covers any fetch or short script, and no setting may buy more than a day in one call.
+    assert tools.TICK_UNITS == 7000 and tools.INTERVAL_SECONDS == 3600
+    assert tools.DEFAULT_MAX_INTERVALS == 1 and tools.HARD_MAX_INTERVALS == 24
+    assert tools.price_line(1, 5) == PRICE_1_5
+    assert "at most 2 intervals (0.015 USDC)" in tools.price_line(2, 5)
+
+
+def test_the_subprocess_waits_out_the_paid_hours_and_no_longer():
+    assert tools.run_seconds(1) == tools.BOOT_SECONDS + 3600 + 60
+    assert tools.run_seconds(24) == tools.BOOT_SECONDS + 24 * 3600 + 60
 
 
 # ---------- the allowlist: empty means everyone the operator allowed on the platform ----------
@@ -181,7 +197,7 @@ def test_without_an_allowlist_the_session_is_never_looked_up(monkeypatch):
 # ---------- caps: one call, one day ----------
 
 
-@pytest.mark.parametrize("value", ["0", "61", "x", "-1", "1.5", " 6 6"])
+@pytest.mark.parametrize("value", ["0", "25", "x", "-1", "1.5", " 6 6"])
 def test_a_malformed_interval_cap_refuses_by_name_before_anything_runs(monkeypatch, value):
     with_bridge(monkeypatch)
     monkeypatch.setenv("CHARTER_MAX_INTERVALS", value)
@@ -206,13 +222,13 @@ def test_a_daily_cap_of_zero_refuses_every_call(monkeypatch, tmp_path):
     assert not day_count(tmp_path).exists()
 
 
-def test_the_default_caps_are_six_intervals_and_five_leases(monkeypatch):
+def test_the_default_caps_are_one_interval_and_five_leases(monkeypatch):
     with_bridge(monkeypatch)
     seen = []
     fake_job(monkeypatch, seen=seen)
     out = rent({"urls": URLS})
-    assert seen[0][0]["max_intervals"] == 6 and seen[0][0]["daily_leases"] == 5
-    assert out["price"] == PRICE_6_5
+    assert seen[0][0]["max_intervals"] == 1 and seen[0][0]["daily_leases"] == 5
+    assert out["price"] == PRICE_1_5
 
 
 def test_the_day_counter_refuses_the_lease_past_the_cap(monkeypatch, tmp_path):
@@ -291,8 +307,8 @@ def test_the_answer_carries_the_spend_and_the_price(monkeypatch):
     out = rent({"urls": URLS})
     assert out == {"leaseId": "L1", "state": "closed", "paidIntervals": 2, "spent": "11000",
                    "spentUsdc": "0.011",
-                   "price": "0.001 USDC to open plus 0.005 USDC per 30 second interval, at most 10 intervals "
-                            "(0.051 USDC) per call; 3 leases a day",
+                   "price": "0.001 USDC to open plus 0.007 USDC per one hour interval, at most 10 intervals "
+                            "(0.071 USDC) per call; 3 leases a day",
                    "pages": [{"url": URLS[0], "text": "hello"}]}
     assert "jpegBase64" not in json.dumps(out)
 
@@ -361,7 +377,7 @@ def test_settings_prefer_hermes_secret_scope_over_the_environment(monkeypatch):
 def test_settings_have_safe_defaults(monkeypatch, tmp_path):
     monkeypatch.delenv("CHARTER_STATE_DIR")
     s = tools.settings()
-    assert s["max_intervals"] == 6 and s["daily_leases"] == 5 and s["allowed_ids"] == set()
+    assert s["max_intervals"] == 1 and s["daily_leases"] == 5 and s["allowed_ids"] == set()
     assert s["relay"] == "wss://relay.mainnet.toonprotocol.dev" and s["bin"] == "charter"
     assert s["bridge_cmd"] == "" and s["passphrase_file"] == "" and s["offer"] == ""
     assert s["state_dir"] == Path.home() / ".charter-tool"
@@ -415,11 +431,11 @@ def charter_calls(charter):
 def test_direct_mode_runs_charter_with_the_fixed_command_line(monkeypatch, charter, tmp_path):
     direct(monkeypatch, charter)
     out = rent({"urls": URLS})
-    assert out["leaseId"] == "L1" and out["spentUsdc"] == "0.006" and out["price"] == PRICE_6_5
+    assert out["leaseId"] == "L1" and out["spentUsdc"] == "0.006" and out["price"] == PRICE_1_5
     assert out["pages"] == [{"url": URLS[0], "text": "hi"}]
     (call,) = charter_calls(charter)
     assert call["argv"] == ["rent", "--offer", "a" * 64 + ":gpu1", "--urls", ",".join(URLS),
-                            "--max-intervals", "6", "--relay", "wss://relay.mainnet.toonprotocol.dev",
+                            "--max-intervals", "1", "--relay", "wss://relay.mainnet.toonprotocol.dev",
                             "--json"]
     assert call["pass"] == str(charter["pass"])
     assert day_count(tmp_path).read_text() == "1\n"
@@ -428,7 +444,7 @@ def test_direct_mode_runs_charter_with_the_fixed_command_line(monkeypatch, chart
 def test_direct_mode_honours_the_interval_cap_and_the_relay(monkeypatch, charter):
     direct(monkeypatch, charter, CHARTER_MAX_INTERVALS="12", CHARTER_RELAY_URL="wss://relay.example/")
     out = rent({"urls": URLS})
-    assert "at most 12 intervals (0.061 USDC)" in out["price"]
+    assert "at most 12 intervals (0.085 USDC)" in out["price"]
     (call,) = charter_calls(charter)
     assert call["argv"][call["argv"].index("--max-intervals") + 1] == "12"
     assert call["argv"][call["argv"].index("--relay") + 1] == "wss://relay.example/"
@@ -622,7 +638,7 @@ def test_bridge_runs_charter_with_the_fixed_command_line(vm):
     assert json.loads(done.stdout)["leaseId"] == "L1"
     (call,) = calls(vm)
     assert call["argv"] == ["rent", "--offer", "a" * 64 + ":gpu1", "--urls", ",".join(URLS),
-                            "--max-intervals", "6", "--relay", "wss://relay.example/", "--json"]
+                            "--max-intervals", "1", "--relay", "wss://relay.example/", "--json"]
     assert call["pass"] == f"{vm['home']}/secrets/passphrase"
 
 
@@ -750,7 +766,7 @@ def test_bridge_runs_charter_with_the_script_in_a_private_temp_file(vm):
     argv = call["argv"]
     path = argv[argv.index("--python") + 1]
     assert argv == ["rent", "--offer", "a" * 64 + ":gpu1", "--python", path,
-                    "--max-intervals", "6", "--relay", "wss://relay.example/", "--json"]
+                    "--max-intervals", "1", "--relay", "wss://relay.example/", "--json"]
     assert "--urls" not in argv
     assert call["script"] == SCRIPT
     assert call["mode"] == "0o600"
