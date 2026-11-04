@@ -1,17 +1,35 @@
 name: charter-tool
-version: "0.2.0"
+version: "0.3.0"
 description: >-
-  charter_rent rents one short Charter lease on a hidden host and runs one job in it: a fetch of
-  the URLs a user gives (the page texts come back) or a Python script of at most 8 KiB with no
-  network (stdout, stderr and the exit code come back). Only the ids listed in CHARTER_ALLOWED_IDS
-  may call it, and any other caller is refused before anything is run or paid.
-  Disclosure: every call spends real USDC from the node's wallet (an opening fee of 0.001
-  plus up to six ticks of 0.005), capped by charter-bridge (5 leases a UTC day, 6 intervals
-  each) and by the node's own spending limit, which this plugin never touches.
+  charter_rent rents one short lease on a Charter compute host (charter.mainnet.toonprotocol.dev)
+  through the operator's own charter CLI and toon node, and runs one job in it: a fetch of 1 to 5
+  URLs (the page texts come back) or a Python 3 script of at most 8 KiB with no network (stdout,
+  stderr and the exit code come back). Every answer states what the call spent and the price
+  schedule in force.
+  Disclosure: every call spends real USDC from the operator's toon node wallet with no per-call
+  confirmation: 0.001 USDC to open plus 0.007 USDC per one hour interval on the mainnet host, so
+  at most 0.008 USDC per call at the default cap. The caps are the operator's settings:
+  CHARTER_MAX_INTERVALS (default 1, ceiling 24) bounds one call and CHARTER_DAILY_LEASES
+  (default 5) bounds a UTC day, counted by the plugin before a lease starts; the node's own
+  spending limit, which the plugin never touches, bounds everything. With CHARTER_ALLOWED_IDS
+  unset, every user the operator already allows on the platform may rent. The plugin runs the
+  charter binary (or the operator's CHARTER_BRIDGE_CMD) as a subprocess with a minimal
+  environment and hands it the path in TOON_PASSPHRASE_FILE; it never reads the passphrase itself.
 author: Drew Pierson
 kind: backend
 requires_hermes: ">=0.21.3"
 python_dependencies: []
+requires_env: []
+optional_env:
+  - CHARTER_BRIDGE_CMD
+  - CHARTER_BIN
+  - TOON_PASSPHRASE_FILE
+  - CHARTER_OFFER_ID
+  - CHARTER_RELAY_URL
+  - CHARTER_MAX_INTERVALS
+  - CHARTER_DAILY_LEASES
+  - CHARTER_ALLOWED_IDS
+  - CHARTER_STATE_DIR
 provides_tools:
   - charter_rent
 provides_hooks: []

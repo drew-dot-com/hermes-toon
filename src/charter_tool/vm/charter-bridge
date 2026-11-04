@@ -36,7 +36,7 @@ from pathlib import Path
 HOME = Path(os.environ.get("HOME", "~")).expanduser()
 CHARTER = os.environ.get("CHARTER_BIN", str(HOME / ".local/bin/charter"))
 MAX_LEASES = 5  # a constant: nothing in the environment can raise it
-MAX_INTERVALS = 6
+MAX_INTERVALS = 1  # one hour at the host's hourly price (0.007 USDC) covers any fetch or short script
 MAX_URLS = 5
 MAX_URL_CHARS = 2048
 MAX_SCRIPT_BYTES = 8 * 1024  # charter's own limit
