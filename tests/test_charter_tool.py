@@ -7,6 +7,7 @@ The tool half runs against a fake ``run_job`` or a fake ``charter`` binary; the 
 from __future__ import annotations
 
 import json
+import re
 import os
 import stat
 import subprocess
@@ -29,7 +30,7 @@ PY_OUT = {"kind": "python", "exitCode": 0, "signal": None, "timedOut": False, "s
 LEASE = {"leaseId": "L1", "state": "closed", "paidIntervals": 2, "spent": "11000",
          "output": {"pages": [{"url": URLS[0], "text": "hello", "jpegBase64": "AAAA"}]}}
 PRICE_1_5 = ("0.001 USDC to open plus 0.007 USDC per one hour interval, at most 1 interval (0.008 USDC) "
-             "per call; 5 leases a day")
+             "per call, plus 0.0001 USDC a status read, a few per call; 5 leases a day")
 
 
 class Ctx:
@@ -95,7 +96,7 @@ def test_manifest_lists_exactly_the_registered_tools_and_the_version():
     text = (ROOT / "src/charter_tool/plugin.yaml").read_text()
     m = yaml.safe_load(text)
     assert m["name"] == "charter-tool"
-    assert m["version"] == charter_tool.__version__ == "0.3.0"
+    assert m["version"] == charter_tool.__version__ == "0.3.1"
     assert sorted(m["provides_tools"]) == sorted(ctx.tools) == ["charter_rent"]
     assert all(t[1]["name"] == n for n, t in ctx.tools.items())
     assert ctx.tools["charter_rent"][2]["check_fn"] is tools.available
@@ -126,6 +127,19 @@ def test_the_schedule_is_the_live_hosts_hourly_one():
     assert tools.DEFAULT_MAX_INTERVALS == 1 and tools.HARD_MAX_INTERVALS == 24
     assert tools.price_line(1, 5) == PRICE_1_5
     assert "at most 2 intervals (0.015 USDC)" in tools.price_line(2, 5)
+
+
+def test_the_price_line_and_the_schema_count_the_status_reads():
+    # A short job is open + one tick + a few 0.0001 USDC status reads, about 0.0083, not 0.008.
+    assert tools.STATUS_UNITS == 100
+    line = tools.price_line(1, 5)
+    assert "0.0001 USDC a status read" in line and line == PRICE_1_5
+    d = tools.RENT_SCHEMA["description"]
+    assert "about 0.0083 USDC for a short job" in d and "at most)" not in d
+
+
+def test_the_bridge_waits_out_a_paid_hour():
+    assert re.search(r"^RUN_SECONDS = 3700\b", BRIDGE.read_text(), re.M), "the bridge must outlast one paid hour"
 
 
 def test_the_subprocess_waits_out_the_paid_hours_and_no_longer():
@@ -308,7 +322,7 @@ def test_the_answer_carries_the_spend_and_the_price(monkeypatch):
     assert out == {"leaseId": "L1", "state": "closed", "paidIntervals": 2, "spent": "11000",
                    "spentUsdc": "0.011",
                    "price": "0.001 USDC to open plus 0.007 USDC per one hour interval, at most 10 intervals "
-                            "(0.071 USDC) per call; 3 leases a day",
+                            "(0.071 USDC) per call, plus 0.0001 USDC a status read, a few per call; 3 leases a day",
                    "pages": [{"url": URLS[0], "text": "hello"}]}
     assert "jpegBase64" not in json.dumps(out)
 
@@ -537,6 +551,20 @@ def bridge_cmd(tmp_path):
         "{'pages': [{'url': 'https://example.com/a', 'text': 'via bridge'}]}}))\n"
     )
     return {"cmd": f"{sys.executable} {script} rent", "log": log}
+
+
+def test_a_tilde_in_the_bridge_programs_path_is_expanded_as_the_readme_example_needs(monkeypatch, bridge_cmd, tmp_path):
+    # The README's example starts with ~/.local/lima/bin/limactl; the plugin runs argv without a
+    # shell, so it expands the ~ of the first word itself (the rest of the line is the operator's).
+    home = tmp_path / "home"
+    (home / "bin").mkdir(parents=True)
+    (home / "bin" / "py").symlink_to(sys.executable)
+    monkeypatch.setenv("HOME", str(home))
+    script = bridge_cmd["cmd"].split(" ", 1)[1]
+    monkeypatch.setenv("CHARTER_BRIDGE_CMD", f"~/bin/py {script}")
+    out = rent({"urls": URLS})
+    assert out["leaseId"] == "B1", out
+    assert json.loads(bridge_cmd["log"].read_text().splitlines()[0])["argv"] == ["rent"]
 
 
 def test_bridge_mode_sends_the_job_on_stdin_and_reads_the_last_json_line(monkeypatch, bridge_cmd,

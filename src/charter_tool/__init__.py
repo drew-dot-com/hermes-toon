@@ -7,7 +7,7 @@ an offer id; the caps and the allowlist are settings with safe defaults. See ``t
 
 from . import tools
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 
 def register(ctx) -> None:

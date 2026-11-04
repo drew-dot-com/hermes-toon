@@ -158,9 +158,10 @@ job in it.
 | python | `script`: Python 3, at most 8 KiB, no network, NumPy available | stdout (4 KiB), stderr (2 KiB), exit code | the same |
 
 A lease pays per interval while the job runs, so a call costs the opening fee
-plus one tick per interval used, never more than the cap allows: with the
-default cap of 1 interval that is 0.008 USDC at most, and a job that exits
-frees the machine whatever is paid. Every answer carries
+plus one tick per interval used plus a few 0.0001 USDC status reads, never
+more than the cap allows: with the default cap of 1 interval a short job costs
+about 0.0083 USDC, and a job that exits frees the machine whatever is paid.
+Every answer carries
 `spent` (USDC base units, as `charter` reports it), `spentUsdc` and a `price`
 line stating the schedule and the caps in force, so the agent can tell its user
 what the call cost. Prices are the offer's (an offer lives 45 minutes and the host
@@ -208,7 +209,7 @@ All optional except the two the `charter` CLI needs. Put them in
 | `TOON_PASSPHRASE_FILE` | file holding the node wallet's passphrase; handed to `charter`, never read here | required without a bridge |
 | `CHARTER_OFFER_ID` | `<host pubkey>:<offer id>` from `charter offers` | required without a bridge |
 | `CHARTER_RELAY_URL` | the relay that carries offers | `wss://relay.mainnet.toonprotocol.dev` |
-| `CHARTER_MAX_INTERVALS` | hours one call may pay for, 1 to 24 | `1` (0.008 USDC at most per call) |
+| `CHARTER_MAX_INTERVALS` | hours one call may pay for, 1 to 24 | `1` (about 0.0083 USDC for a short job) |
 | `CHARTER_DAILY_LEASES` | leases a UTC day; `0` refuses every call | `5` |
 | `CHARTER_ALLOWED_IDS` | who may call it, as `platform:user_id` entries, e.g. `telegram:123,discord:456` | empty: everyone Hermes already lets talk to the agent |
 | `CHARTER_BIN` | path to the `charter` binary | `charter` on PATH |
@@ -229,6 +230,9 @@ instead of running `charter` itself:
 ```
 CHARTER_BRIDGE_CMD=~/.local/lima/bin/limactl shell toon -- bash -lc '~/bin/charter-bridge rent'
 ```
+
+No shell runs that line: the plugin splits it itself and expands only the `~`
+of the first word (the quoted part runs in the VM's own shell).
 
 The bridge is one script in the VM that takes only `rent`, keeps the
 passphrase file, offer id and relay in its own `~/.config/charter/bridge.env`

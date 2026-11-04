@@ -30,6 +30,7 @@ from pathlib import Path
 
 OPEN_UNITS = 1000  # 0.001 USDC to open a lease
 TICK_UNITS = 7000  # 0.007 USDC per interval
+STATUS_UNITS = 100  # 0.0001 USDC a status read; charter reads a few per call
 INTERVAL_SECONDS = 3600
 INTERVAL_TEXT = "one hour"  # how the interval reads in a price line
 USDC_DECIMALS = 6
@@ -225,6 +226,9 @@ def run_bridge(s: dict, job: dict) -> dict:
     argv = shlex.split(s["bridge_cmd"])
     if not argv:
         return {"error": "CHARTER_BRIDGE_CMD is empty"}
+    # No shell runs this line, so the ~ of the program itself is expanded here; the rest is passed as is.
+    if argv[0].startswith("~"):
+        argv[0] = os.path.expanduser(argv[0])
     try:
         done = subprocess.run(argv, input=json.dumps(job), capture_output=True, text=True,
                               timeout=max(600, run_seconds(s["max_intervals"])))
@@ -285,8 +289,8 @@ def price_line(max_intervals: int, daily_leases: int) -> str:
     most = usdc(OPEN_UNITS + TICK_UNITS * max_intervals)
     plural = "" if max_intervals == 1 else "s"
     return (f"{usdc(OPEN_UNITS)} USDC to open plus {usdc(TICK_UNITS)} USDC per {INTERVAL_TEXT} "
-            f"interval, at most {max_intervals} interval{plural} ({most} USDC) per call; "
-            f"{daily_leases} leases a day")
+            f"interval, at most {max_intervals} interval{plural} ({most} USDC) per call, "
+            f"plus {usdc(STATUS_UNITS)} USDC a status read, a few per call; {daily_leases} leases a day")
 
 
 RENT_SCHEMA = {
@@ -297,9 +301,10 @@ RENT_SCHEMA = {
         "stderr and exit code come back). Pass exactly one of urls and script. The script runs with "
         "no network, at most 8 KiB of UTF-8, NumPy available; it must print what it wants returned. "
         f"Each call is a real payment from this node's wallet: {usdc(OPEN_UNITS)} USDC to open plus "
-        f"{usdc(TICK_UNITS)} USDC per {INTERVAL_TEXT} interval, up to the operator's interval "
-        f"cap (default {DEFAULT_MAX_INTERVALS}, so {usdc(OPEN_UNITS + TICK_UNITS * DEFAULT_MAX_INTERVALS)} "
-        f"USDC at most), and at most the operator's daily lease cap (default {DEFAULT_DAILY_LEASES}). "
+        f"{usdc(TICK_UNITS)} USDC per {INTERVAL_TEXT} interval plus a few {usdc(STATUS_UNITS)} USDC status "
+        f"reads, up to the operator's interval cap (default {DEFAULT_MAX_INTERVALS}, so about "
+        f"{usdc(OPEN_UNITS + TICK_UNITS * DEFAULT_MAX_INTERVALS + 3 * STATUS_UNITS)} USDC for a short job), "
+        f"and at most the operator's daily lease cap (default {DEFAULT_DAILY_LEASES}). "
         "Use it only when the user asks for a page to be fetched or code to be run on a rented machine, "
         "and tell the user what the call spent, from the spent and price fields of the result."
     ),
