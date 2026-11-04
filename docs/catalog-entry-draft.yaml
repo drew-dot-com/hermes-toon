@@ -1,10 +1,10 @@
 # Draft of plugin-catalog/charter-tool.yaml for NousResearch/hermes-agent.
-# The sha is a placeholder until the hermes-toon PR that ships charter-tool 0.3.0 is merged:
-# replace it with the full 40-character sha of the merge commit on main, then open the catalog
+# The sha is the merge commit of PR 1 (charter-tool 0.3.0) on main, 2026-11-04. If it is republished,
+# replace it with the full 40-character sha of the new main, then open the catalog
 # PR from a fork (rule 4: pins are exact; rule 5: submitted by the repo owner).
 name: charter-tool
 repo: https://github.com/drew-dot-com/hermes-toon
-sha: REPLACE_WITH_THE_40_HEX_SHA_OF_HERMES_TOON_MAIN_AFTER_MERGE
+sha: 29d3b66e32a346b4f897c351ce24d83efb97e27f
 version: "0.3.0"
 subdir: src/charter_tool
 description: >-
