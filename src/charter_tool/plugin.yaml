@@ -1,5 +1,5 @@
 name: charter-tool
-version: "0.3.1"
+version: "0.4.0"
 description: >-
   charter_rent rents one short lease on a Charter compute host (charter.mainnet.toonprotocol.dev)
   through the operator's own charter CLI and toon node, and runs one job in it: a fetch of 1 to 5
@@ -15,7 +15,9 @@ description: >-
   spending limit, which the plugin never touches, bounds everything. With CHARTER_ALLOWED_IDS
   unset, every user the operator already allows on the platform may rent. The plugin runs the
   charter binary (or the operator's CHARTER_BRIDGE_CMD) as a subprocess with a minimal
-  environment and hands it the path in TOON_PASSPHRASE_FILE; it never reads the passphrase itself.
+  environment and hands it the path in TOON_PASSPHRASE_FILE, or, with CHARTER_PAYER_URL set, has
+  it pay through the local charter payer service that owns the machine's one channel (how an
+  agent in a Charter home pays); it never reads the passphrase itself.
 author: Drew Pierson
 kind: backend
 requires_hermes: ">=0.21.3"
@@ -25,6 +27,7 @@ optional_env:
   - CHARTER_BRIDGE_CMD
   - CHARTER_BIN
   - TOON_PASSPHRASE_FILE
+  - CHARTER_PAYER_URL
   - CHARTER_OFFER_ID
   - CHARTER_RELAY_URL
   - CHARTER_MAX_INTERVALS

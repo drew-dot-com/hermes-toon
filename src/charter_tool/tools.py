@@ -4,7 +4,10 @@ A lease runs one of two jobs: a fetch of 1 to 5 URLs, or a Python script with no
 By default the plugin runs the ``charter`` CLI on this machine (github.com/drew-dot-com/charter,
 next to a ``toon`` node whose wallet pays). An operator whose node lives elsewhere, a Mac with
 the node in a Lima VM for one, sets ``CHARTER_BRIDGE_CMD`` instead, and the job goes to that
-command as JSON on stdin (see ``vm/charter-bridge``).
+command as JSON on stdin (see ``vm/charter-bridge``). An agent living in a Charter home, or any
+machine that runs a ``charter payer`` service, sets ``CHARTER_PAYER_URL`` instead of a passphrase
+file: ``charter`` then pays through that one local service, which owns the channel every process
+on the machine shares (``charter payer``, docs/env.md in the charter repo).
 
 Every call spends real USDC from the operator's node wallet, so the plugin bounds a call
 (``CHARTER_MAX_INTERVALS``), bounds a day (``CHARTER_DAILY_LEASES``, counted here before the
@@ -53,9 +56,12 @@ URL = re.compile(r"https?://[\x21-\x7e]+")  # printable ASCII, no spaces; commas
 COUNT = re.compile(r"\d{1,6}\n?")
 
 SETTINGS = (
-    "CHARTER_BRIDGE_CMD", "CHARTER_BIN", "TOON_PASSPHRASE_FILE", "CHARTER_OFFER_ID", "CHARTER_RELAY_URL",
-    "CHARTER_MAX_INTERVALS", "CHARTER_DAILY_LEASES", "CHARTER_ALLOWED_IDS", "CHARTER_STATE_DIR",
+    "CHARTER_BRIDGE_CMD", "CHARTER_BIN", "TOON_PASSPHRASE_FILE", "CHARTER_PAYER_URL", "CHARTER_OFFER_ID",
+    "CHARTER_RELAY_URL", "CHARTER_MAX_INTERVALS", "CHARTER_DAILY_LEASES", "CHARTER_ALLOWED_IDS",
+    "CHARTER_STATE_DIR",
 )
+# Set by the host inside a Charter home; passed on to ``charter`` when present so it needs no relay read.
+BOX_ENV = ("CHARTER_OFFER_JSON", "CHARTER_CONNECTOR_URL")
 
 
 # ---------- settings ----------
@@ -89,6 +95,7 @@ def settings() -> dict:
         "bridge_cmd": _setting("CHARTER_BRIDGE_CMD"),
         "bin": _setting("CHARTER_BIN") or "charter",
         "passphrase_file": _setting("TOON_PASSPHRASE_FILE"),
+        "payer_url": _setting("CHARTER_PAYER_URL").rstrip("/"),
         "offer": _setting("CHARTER_OFFER_ID"),
         "relay": _setting("CHARTER_RELAY_URL") or DEFAULT_RELAY,
         "max_intervals": _int_setting("CHARTER_MAX_INTERVALS", DEFAULT_MAX_INTERVALS, 1, HARD_MAX_INTERVALS),
@@ -252,9 +259,14 @@ def run_charter(s: dict, job: dict) -> dict:
     if not_ready:
         return {"error": not_ready}
     binary = charter_path(s["bin"])
-    # Only what charter and the toon binary it runs need: nothing else in this process reaches them.
-    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": str(Path.home()),
-           "TOON_PASSPHRASE_FILE": s["passphrase_file"]}
+    # Only what charter and the payer it uses need: nothing else in this process reaches them.
+    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": str(Path.home())}
+    if s["payer_url"]:
+        # The local payer service owns the channel; charter only talks to it on loopback.
+        env.update({"CHARTER_PAYER": "url", "CHARTER_PAYER_URL": s["payer_url"]})
+        env.update({name: os.environ[name] for name in BOX_ENV if os.environ.get(name)})
+    else:
+        env["TOON_PASSPHRASE_FILE"] = s["passphrase_file"]
     script = _write_script(s["state_dir"], job["script"]) if "script" in job else None
     job_args = ["--python", script] if script else ["--urls", ",".join(job["urls"])]
     argv = [binary, "rent", "--offer", s["offer"], *job_args, "--max-intervals", str(s["max_intervals"]),
@@ -429,8 +441,11 @@ def _direct_ready(s: dict) -> str | None:
         return (f"the charter CLI was not found (CHARTER_BIN is {s['bin']!r}); install it from "
                 "github.com/drew-dot-com/charter (npm ci, npm run build, npm install -g .) "
                 "or set CHARTER_BRIDGE_CMD")
-    needed = (("TOON_PASSPHRASE_FILE", "passphrase_file"), ("CHARTER_OFFER_ID", "offer"))
+    needed = [("CHARTER_OFFER_ID", "offer")]
+    if not s["payer_url"]:
+        needed.insert(0, ("TOON_PASSPHRASE_FILE", "passphrase_file"))
     missing = [name for name, key in needed if not s[key]]
     if missing:
-        return f"{' and '.join(missing)} must be set to rent without a bridge"
+        return f"{' and '.join(missing)} must be set to rent without a bridge" + (
+            "" if s["payer_url"] else " (or CHARTER_PAYER_URL, to pay through a charter payer service)")
     return None

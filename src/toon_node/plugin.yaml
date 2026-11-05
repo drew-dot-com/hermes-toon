@@ -1,18 +1,27 @@
 name: toon-node
-version: "0.1.0"
+version: "0.2.0"
 description: >-
-  Tools over a toon agent node (github.com/toon-protocol/toon_cli): toon_post publishes a
-  paid note to a TOON relay, toon_read reads that relay for free, toon_status reports the
-  node's network, wallet balances read from the chains, channels and spending limit.
-  Disclosure: every toon_post spends from the node's payment channel (0.001 USDC on the
-  default relay), capped by toon-bridge (50 posts a day) and by the node's own spending
-  limit, which only the wallet passphrase can raise and this plugin never sees.
+  Tools over the agent's own TOON payer: toon_post publishes a paid note to a TOON relay,
+  toon_read reads that relay for free, toon_status reports the payer's channel, the wallet's
+  balances read from the chain and today's spend. Everything paid goes through the local
+  charter payer service at TOON_PAYER_URL (github.com/drew-dot-com/charter), the one process
+  that owns the machine's payment channel; the plugin holds no key.
+  Disclosure: every toon_post spends from that channel (0.001 USDC on the default relay) with
+  no per-call confirmation, capped by TOON_POST_CAP (default 50 a day, counted here before the
+  service is asked) and by the service's own daily cap on fetches and posts.
 author: Drew Pierson
 kind: backend
 requires_hermes: ">=0.21.3"
 python_dependencies:
   - "httpx>=0.27,<0.29"
-  - "websockets>=12"
+requires_env:
+  - name: TOON_PAYER_URL
+    prompt: charter payer service URL
+    help: The local service that owns the payment channel, e.g. http://127.0.0.1:3510 (`charter payer`, github.com/drew-dot-com/charter).
+optional_env:
+  - TOON_RELAY_URL
+  - TOON_POST_CAP
+  - TOON_STATE_DIR
 provides_tools:
   - toon_post
   - toon_read

@@ -1,57 +1,135 @@
-"""Three tools over a toon agent node: post a note, read a relay, report the node.
+"""Three tools over the agent's TOON payer: post a note, read a relay, report the payer.
 
-Posting and the node's own state go through ``toon-bridge`` inside the VM that
-holds the node (see ``vm/toon-bridge``): one fixed command line, with anything
-a chat user wrote passed as JSON on stdin. Reading the relay and the chain is
-public and free, so it happens here.
+Everything paid goes through one local ``charter payer`` service (``TOON_PAYER_URL``, the same
+variable the ``web-toon`` provider uses), the process that owns the machine's one payment channel
+(github.com/drew-dot-com/charter, ``charter payer``). This plugin never holds a key: ``toon_post``
+asks the service to sign and pay a note onto the relay, ``toon_read`` asks it for a free relay
+read (the service's WebSocket follows the machine's proxy, which matters inside a Charter home),
+and ``toon_status`` reports the service's channel plus the payer wallet's balances read from the
+chain. Until 0.1.0 these tools bridged into a ``toon`` node in a Lima VM; that path is gone.
 """
 
 from __future__ import annotations
 
-import asyncio
+import fcntl
 import json
 import os
-import subprocess
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 
-RELAY_URL = os.environ.get("TOON_RELAY_URL", "wss://relay.167-233-221-236.sslip.io")
-LIMACTL = os.environ.get("TOON_LIMACTL", str(Path.home() / ".local/lima/bin/limactl"))
-VM = os.environ.get("TOON_VM", "toon")
-BRIDGE = os.environ.get("TOON_BRIDGE", "~/bin/toon-bridge")
+DEFAULT_RELAY = "wss://relay.mainnet.toonprotocol.dev"
 BASE_RPC = os.environ.get("TOON_BASE_RPC", "https://mainnet.base.org")
-SOLANA_RPC = os.environ.get("TOON_SOLANA_RPC", "https://api.mainnet-beta.solana.com")
 BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-SOLANA_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 MAX_READ = 50
 MAX_CONTENT_SHOWN = 500
+MAX_POST_CHARS = 1000
+DEFAULT_POST_CAP = 50
+# The service pays and waits for the relay's answer; a first call may also open a channel on chain.
+POST_TIMEOUT_S = 90.0
+READ_TIMEOUT_S = 30.0
+HEALTH_TIMEOUT_S = 15.0
+
+SETTINGS = ("TOON_PAYER_URL", "TOON_RELAY_URL", "TOON_POST_CAP", "TOON_STATE_DIR")
+
+
+def _setting(name: str, default: str = "") -> str:
+    """One operator setting, through Hermes's profile-scoped secret reader when it is importable."""
+    try:
+        from agent.secret_scope import get_secret_str
+    except ImportError:
+        return os.environ.get(name, default).strip()
+    return (get_secret_str(name, default) or "").strip()
+
+
+def payer_url() -> str:
+    return _setting("TOON_PAYER_URL").rstrip("/")
+
+
+def relay_url() -> str:
+    return _setting("TOON_RELAY_URL") or DEFAULT_RELAY
+
+
+def post_cap() -> int:
+    raw = _setting("TOON_POST_CAP")
+    return int(raw) if raw.isdigit() else DEFAULT_POST_CAP
+
+
+def state_dir() -> Path:
+    return Path(_setting("TOON_STATE_DIR") or "~/.toon-node").expanduser()
 
 
 def available() -> bool:
-    return Path(LIMACTL).is_file()
+    """The tools are offered exactly when a payer service URL is set."""
+    return bool(payer_url())
 
 
-def bridge(command: str, stdin: dict | None = None, timeout: float = 120) -> dict:
-    """Run ``toon-bridge <command>`` in the VM. ``command`` is one of two fixed words."""
-    if command not in ("post", "status"):
-        raise ValueError(command)
-    done = subprocess.run(
-        [LIMACTL, "shell", VM, "--", "bash", "-lc", f"{BRIDGE} {command}"],
-        input=json.dumps(stdin or {}),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
-    text = done.stdout.strip().splitlines()
-    if not text:
-        return {"error": (done.stderr.strip() or "toon-bridge printed nothing")[-500:]}
+def _error(message: str) -> str:
+    return json.dumps({"error": message[:500]})
+
+
+def _reason(payload: dict, status: int) -> str:
+    code = payload.get("code") or f"HTTP {status}"
+    error = payload.get("error") or payload.get("message") or ""
+    return f"{code}: {error}".strip(": ")
+
+
+def _get(path: str, params: dict | None = None, timeout: float = HEALTH_TIMEOUT_S) -> tuple[int, dict]:
+    base = payer_url()
     try:
-        return json.loads(text[-1])
-    except json.JSONDecodeError:
-        return {"error": text[-1][-500:]}
+        r = httpx.get(f"{base}{path}", params=params, timeout=timeout, trust_env=False)
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"TOON payer service unreachable at {base}: {type(exc).__name__}") from exc
+    try:
+        return r.status_code, r.json()
+    except ValueError as exc:
+        raise RuntimeError(f"TOON payer service answered non-JSON (HTTP {r.status_code})") from exc
+
+
+def _post(path: str, body: dict, timeout: float) -> tuple[int, dict]:
+    base = payer_url()
+    try:
+        r = httpx.post(f"{base}{path}", json=body, timeout=timeout, trust_env=False)
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"TOON payer service unreachable at {base}: {type(exc).__name__}") from exc
+    try:
+        return r.status_code, r.json()
+    except ValueError as exc:
+        raise RuntimeError(f"TOON payer service answered non-JSON (HTTP {r.status_code})") from exc
+
+
+# ---------- the day's post count, taken under a lock before the service is asked ----------
+
+
+def count_post(directory: Path, cap: int) -> str | None:
+    """Count one post against today's cap, or say why not.
+
+    A counter that cannot be read counts as the cap reached.
+    """
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    counter = directory / f"posts-{today}"
+    with open(directory / "post.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            n = int(counter.read_text() or "0") if counter.exists() else 0
+        except (OSError, ValueError):
+            return "today's post counter is unreadable; refusing to post"
+        if n >= cap:
+            return f"today's cap of {cap} posts is reached"
+        counter.write_text(f"{n + 1}\n")
+    return None
+
+
+def posts_today(directory: Path) -> int:
+    counter = directory / f"posts-{datetime.now(UTC).strftime('%Y-%m-%d')}"
+    try:
+        return int(counter.read_text() or "0") if counter.exists() else 0
+    except (OSError, ValueError):
+        return 0
 
 
 # ---------- toon_post ----------
@@ -59,14 +137,17 @@ def bridge(command: str, stdin: dict | None = None, timeout: float = 120) -> dic
 POST_SCHEMA = {
     "name": "toon_post",
     "description": (
-        "Publish a short public note (Nostr kind 1) to Drew Pierson's TOON relay from your own "
-        "TOON agent node. Each post is a real payment: 1000 base units (0.001 USDC) on Solana "
-        "mainnet, sent over your node's payment channel to Drew's node. Capped at 50 posts a day. "
-        "Use it only when a user asks you to post something to TOON; never post private data."
+        "Publish a short public note (Nostr kind 1) to Drew Pierson's TOON relay, paid from your own "
+        "TOON payment channel through the local payer service. Each post is a real payment, the relay's "
+        "price (0.001 USDC on the default relay), from the same channel that pays your rent and fetches. "
+        "Capped at the operator's daily post cap (default 50). Use it only when a user asks you to post "
+        "something to TOON; never post private data."
     ),
     "parameters": {
         "type": "object",
-        "properties": {"content": {"type": "string", "description": "The note, 1 to 1000 characters."}},
+        "properties": {
+            "content": {"type": "string", "description": f"The note, 1 to {MAX_POST_CHARS} characters."},
+        },
         "required": ["content"],
     },
 }
@@ -75,20 +156,42 @@ POST_SCHEMA = {
 def toon_post(args: dict, **_) -> str:
     content = str(args.get("content", "")).strip()
     if not content:
-        return json.dumps({"error": "content is empty"})
-    out = bridge("post", {"content": content})
-    if "error" in out:
-        return json.dumps(out)
-    event = out.get("event", {})
+        return _error("content is empty")
+    if len(content) > MAX_POST_CHARS:
+        return _error(f"content is over {MAX_POST_CHARS} characters")
+    if not payer_url():
+        return _error("TOON_PAYER_URL is not set: run a charter payer service and point it there")
+    cap = post_cap()
+    refused = count_post(state_dir(), cap)
+    if refused:
+        return _error(refused)
+    try:
+        body = {"content": content, "tags": [["client", "toon-node"]]}
+        status, out = _post("/relay/post", body, POST_TIMEOUT_S)
+    except RuntimeError as exc:
+        return _error(str(exc))
+    if status != 200 or not out.get("ok"):
+        paid = out.get("paid")
+        detail = _reason(out, status)
+        if out.get("relay_status") is not None:
+            detail = f"relay answered HTTP {out['relay_status']}: {json.dumps(out.get('relay_answer'))[:200]}"
+        refused = {"error": f"post refused: {detail}"[:500]}
+        if str(paid).isdigit():
+            refused["paid_base_units"] = int(paid)
+        return json.dumps(refused)
+    event = out.get("event") or {}
+    paid = int(out.get("paid") or 0)
     return json.dumps({
-        "outcome": out.get("outcome"),
+        "outcome": "stored",
         "event_id": event.get("id"),
         "author": event.get("pubkey"),
-        "paid_base_units": out.get("paid"),
-        "paid_usdc": (out.get("paid") or 0) / 1e6,
-        "relay": out.get("relay"),
-        "posts_today": out.get("posts_today"),
-        "post_cap": out.get("post_cap"),
+        "paid_base_units": paid,
+        "paid_usdc": paid / 1e6,
+        "relay": out.get("relay") or relay_url(),
+        "route": out.get("route"),
+        "relay_answer": out.get("relay_answer"),
+        "posts_today": posts_today(state_dir()),
+        "post_cap": cap,
     })
 
 
@@ -112,7 +215,7 @@ READ_SCHEMA = {
             "limit": {"type": "integer", "description": f"How many events, 1 to {MAX_READ}. Default 10."},
             "kinds": {"type": "array", "items": {"type": "integer"},
                       "description": "Event kinds to include. Omit for every kind."},
-            "mine": {"type": "boolean", "description": "Only events posted by your own agent node."},
+            "mine": {"type": "boolean", "description": "Only events you posted yourself."},
             "authors": {"type": "array", "items": {"type": "string"},
                         "description": "Author pubkeys, 64 hex."},
             "ids": {"type": "array", "items": {"type": "string"}, "description": "Event ids, 64 hex."},
@@ -210,34 +313,45 @@ def build_filter(args: dict, own_pubkey: str | None) -> dict:
     return f
 
 
-async def _query(url: str, flt: dict, timeout: float = 15) -> list[dict]:
-    import websockets
+_facts_cache: dict = {}
 
-    events: list[dict] = []
-    async with websockets.connect(url, open_timeout=timeout, close_timeout=2) as ws:
-        await ws.send(json.dumps(["REQ", "toon-read", flt]))
-        while True:
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout))
-            if msg[0] == "EVENT" and len(msg) > 2:
-                events.append(msg[2])
-            elif msg[0] in ("EOSE", "CLOSED", "NOTICE"):
-                break
-        await ws.send(json.dumps(["CLOSE", "toon-read"]))
-    return events
+
+def own_pubkey() -> str | None:
+    """The payer service's Nostr pubkey, the author of every toon_post; learned once from /health."""
+    if "nostr_pubkey" not in _facts_cache:
+        try:
+            status, h = _get("/health")
+            if status == 200 and isinstance(h.get("nostr_pubkey"), str):
+                _facts_cache["nostr_pubkey"] = h["nostr_pubkey"]
+        except RuntimeError:
+            return None
+    return _facts_cache.get("nostr_pubkey")
+
+
+def read_relay(flt: dict) -> list[dict]:
+    """A free relay read through the payer service, whose WebSocket follows the machine's proxy."""
+    params = {"filter": json.dumps(flt), "relay": relay_url()}
+    status, out = _get("/relay/read", params, timeout=READ_TIMEOUT_S)
+    if status != 200 or not out.get("ok"):
+        raise RuntimeError(_reason(out, status))
+    return [e for e in out.get("events") or [] if isinstance(e, dict)]
 
 
 async def toon_read(args: dict, **_) -> str:
-    if args.get("mine") and not _own_pubkey():
-        await asyncio.to_thread(prime_facts)
-    own = _own_pubkey()
+    import asyncio
+
+    if not payer_url():
+        return _error("TOON_PAYER_URL is not set: run a charter payer service and point it there")
+    own = await asyncio.to_thread(own_pubkey) if args.get("mine") else _facts_cache.get("nostr_pubkey")
     flt = build_filter(args, own)
+    relay = relay_url()
     try:
-        events = await _query(RELAY_URL, flt)
-    except Exception as error:  # a relay that is down is an answer, not a crash
-        return json.dumps({"error": f"could not read {RELAY_URL}: {error}"[:500]})
+        events = await asyncio.to_thread(read_relay, flt)
+    except RuntimeError as error:  # a relay that is down is an answer, not a crash
+        return json.dumps({"error": f"could not read {relay}: {error}"[:500]})
     events.sort(key=lambda e: e.get("created_at", 0), reverse=True)
     return json.dumps({
-        "relay": RELAY_URL,
+        "relay": relay,
         "filter": flt,
         "events": [summarize_event(e, own) for e in events],
     })
@@ -248,20 +362,14 @@ async def toon_read(args: dict, **_) -> str:
 STATUS_SCHEMA = {
     "name": "toon_status",
     "description": (
-        "Report your own TOON agent node with live data: the network (mainnet, real USDC), your "
-        "wallet balances on Base and Solana read from the chains, your payment channel to Drew "
-        "Pierson's TOON node and how much has gone over it, your spending limit and what is left "
-        "today, and today's post count. Use it for any question about your balance, wallet, "
-        "network or whether you are on mainnet."
+        "Report your own TOON payer with live data: the network (mainnet, real USDC), the payer "
+        "wallet's balances on Base read from the chain, your payment channel to Drew Pierson's edge "
+        "connector (its deposit, what has been signed over it, what is left), today's spend against "
+        "the daily cap for fetches and posts, and today's post count. Use it for any question about "
+        "your balance, wallet, channel, network or whether you are on mainnet."
     ),
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
-
-_facts_cache: dict = {}
-
-
-def _own_pubkey() -> str | None:
-    return _facts_cache.get("agent_identity")
 
 
 def _rpc(url: str, method: str, params: list) -> dict:
@@ -273,7 +381,8 @@ def _rpc(url: str, method: str, params: list) -> dict:
     return body["result"]
 
 
-def balances(evm: str | None, solana: str | None) -> dict:
+def balances(evm: str | None) -> dict:
+    """The payer wallet on Base: ETH and USDC, read from the chain through the machine's proxy."""
     out: dict = {}
     if evm:
         try:
@@ -283,68 +392,63 @@ def balances(evm: str | None, solana: str | None) -> dict:
             out["base"] = {"address": evm, "eth": wei / 1e18, "usdc": usdc / 1e6}
         except Exception as error:
             out["base"] = {"address": evm, "error": str(error)[:200]}
-    if solana:
-        try:
-            lamports = _rpc(SOLANA_RPC, "getBalance", [solana])["value"]
-            accounts = _rpc(SOLANA_RPC, "getTokenAccountsByOwner",
-                            [solana, {"mint": SOLANA_USDC}, {"encoding": "jsonParsed"}])["value"]
-            usdc = sum(int(a["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"]) for a in accounts)
-            out["solana"] = {"address": solana, "sol": lamports / 1e9, "usdc": usdc / 1e6}
-        except Exception as error:
-            out["solana"] = {"address": solana, "error": str(error)[:200]}
     return out
 
 
-def summarize(raw: dict, chain: dict) -> dict:
-    facts = raw.get("facts") or {}
-    node = raw.get("node") or {}
-    apps = node.get("toon_apps") or []
-    connector = (apps[0].get("connector") if apps else None) or {}
+def _usdc(units) -> float | None:
+    try:
+        return int(units) / 1e6
+    except (TypeError, ValueError):
+        return None
+
+
+def summarize(health: dict, chain: dict, posts: int, cap: int) -> dict:
+    """The /health answer as the agent should read it: USDC amounts, one channel line, the cap."""
+    channel = health.get("channel") or {}
+    budget = health.get("budget") or {}
     channels = []
-    for c in raw.get("channels") or []:
+    for c in channel.get("channels") or []:
+        deposit, signed = _usdc(c.get("depositTotal")), _usdc(c.get("signed"))
         channels.append({
             "id": c.get("id"),
-            "chain": c.get("chain"),
-            "direction": c.get("direction"),
-            "status": c.get("status"),
-            "collateral_usdc": (c.get("collateral") or 0) / 1e6,
-            "sent_usdc": (c.get("watermark") or 0) / 1e6,
-            "landed_onchain_usdc": (c.get("landed") or 0) / 1e6,
-            "counterparty": c.get("counterparty"),
+            "chain": channel.get("chain"),
+            "deposit_usdc": deposit,
+            "signed_usdc": signed,
+            "left_usdc": (deposit - signed) if deposit is not None and signed is not None else None,
         })
-    limits = raw.get("limits") or {}
     return {
-        "network": facts.get("network", "unknown"),
-        "about": facts.get("about"),
-        "agent_identity": facts.get("agent_identity"),
-        "ilp_address": connector.get("ilp_address"),
-        "connector_running": connector.get("running"),
-        "peered_with": facts.get("peered_with"),
+        "network": "mainnet (real USDC on Base)",
+        "payer_service": {"version": health.get("version"), "uptime_s": health.get("uptime_s")},
+        "connector": health.get("connector"),
+        "routes": health.get("routes"),
+        "relay": health.get("relay") or relay_url(),
+        "nostr_pubkey": health.get("nostr_pubkey"),
         "wallet": chain,
         "channels": channels,
-        "spending_limit_usdc": {
-            k: int(v) / 1e6 for k, v in limits.items() if isinstance(v, str) and v.isdigit()
+        "channel_headroom_usdc": _usdc(channel.get("headroom")),
+        "daily_cap_usdc": {
+            "day": budget.get("day"),
+            "spent": _usdc(budget.get("spent")),
+            "cap": _usdc(budget.get("cap")),
+            "remaining": _usdc(budget.get("remaining")),
+            "covers": "paid fetches and posts; the rent is paid apart from this cap",
         },
-        "posts_today": raw.get("posts_today"),
-        "post_cap": raw.get("post_cap"),
-        "relay": raw.get("relay"),
+        "posts_today": posts,
+        "post_cap": cap,
     }
 
 
 def toon_status(args: dict, **_) -> str:
-    raw = bridge("status")
-    if "error" in raw:
-        return json.dumps(raw)
-    facts = raw.get("facts") or {}
-    _facts_cache.update(facts)
-    chain = balances(facts.get("evm_address"), facts.get("solana_address"))
-    return json.dumps(summarize(raw, chain))
-
-
-def prime_facts() -> None:
-    """Learn the node's own pubkey once, so toon_read can say which notes are yours."""
+    if not payer_url():
+        return _error("TOON_PAYER_URL is not set: run a charter payer service and point it there")
     try:
-        raw = bridge("status", timeout=60)
-        _facts_cache.update(raw.get("facts") or {})
-    except Exception:
-        pass
+        status, health = _get("/health")
+    except RuntimeError as exc:
+        return _error(str(exc))
+    if status != 200 or not health.get("ok"):
+        return _error(f"payer service unhealthy: {_reason(health, status)}")
+    if isinstance(health.get("nostr_pubkey"), str):
+        _facts_cache["nostr_pubkey"] = health["nostr_pubkey"]
+    payer = (health.get("channel") or {}).get("payer")
+    chain = balances(payer if isinstance(payer, str) else None)
+    return json.dumps(summarize(health, chain, posts_today(state_dir()), post_cap()))

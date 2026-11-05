@@ -1,8 +1,10 @@
 """The ``toon`` web provider: extract only, paid per URL through a local sidecar.
 
-Env: ``TOON_PAYER_URL`` (required), the anonfetch payer sidecar, e.g.
-``http://127.0.0.1:3502``. The sidecar holds the TOON payment channel and the
-spending rules; this provider only asks it for pages and reports what came back.
+Env: ``TOON_PAYER_URL`` (required), the local payer that holds the TOON payment
+channel and the spending rules: the anonfetch payer sidecar (``http://127.0.0.1:3502``)
+or a ``charter payer`` (``http://127.0.0.1:3510``), which answer the same
+``GET /extract?url=`` contract. This provider only asks it for pages and reports
+what came back.
 
 Each URL is one ``GET {TOON_PAYER_URL}/extract?url=...``. A 200 carries the page
 as markdown (``content``) with ``content_hash`` (sha256 of the canonical markdown

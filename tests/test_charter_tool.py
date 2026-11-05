@@ -7,8 +7,8 @@ The tool half runs against a fake ``run_job`` or a fake ``charter`` binary; the 
 from __future__ import annotations
 
 import json
-import re
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -96,7 +96,7 @@ def test_manifest_lists_exactly_the_registered_tools_and_the_version():
     text = (ROOT / "src/charter_tool/plugin.yaml").read_text()
     m = yaml.safe_load(text)
     assert m["name"] == "charter-tool"
-    assert m["version"] == charter_tool.__version__ == "0.3.1"
+    assert m["version"] == charter_tool.__version__ == "0.4.0"
     assert sorted(m["provides_tools"]) == sorted(ctx.tools) == ["charter_rent"]
     assert all(t[1]["name"] == n for n, t in ctx.tools.items())
     assert ctx.tools["charter_rent"][2]["check_fn"] is tools.available
@@ -417,7 +417,10 @@ def charter(tmp_path):
         "mode = oct(os.stat(py).st_mode & 0o777) if py else None\n"
         f"open({str(log)!r}, 'a').write(json.dumps({{'argv': a, 'script': script, 'mode': mode, "
         "'py': py, "
-        "'pass': os.environ.get('TOON_PASSPHRASE_FILE'), 'env': sorted(os.environ)}) + '\\n')\n"
+        "'pass': os.environ.get('TOON_PASSPHRASE_FILE'), 'env': sorted(os.environ), "
+        "'payer': os.environ.get('CHARTER_PAYER'), 'payer_url': os.environ.get('CHARTER_PAYER_URL'), "
+        "'offer_json': os.environ.get('CHARTER_OFFER_JSON'), "
+        "'connector': os.environ.get('CHARTER_CONNECTOR_URL')}) + '\\n')\n"
         f"if os.path.exists({str(tmp_path / 'fail')!r}):\n"
         "    sys.stderr.write('boom\\n'); sys.exit(1)\n"
         "sys.stderr.write('opened lease L1\\n')\n"
@@ -633,7 +636,10 @@ def vm(tmp_path):
         "script = open(py, encoding='utf-8').read() if py else None\n"
         "mode = oct(os.stat(py).st_mode & 0o777) if py else None\n"
         f"open({str(log)!r}, 'a').write(json.dumps({{'argv': a, 'script': script, 'mode': mode, "
-        "'pass': os.environ.get('TOON_PASSPHRASE_FILE'), 'env': sorted(os.environ)}) + '\\n')\n"
+        "'pass': os.environ.get('TOON_PASSPHRASE_FILE'), 'env': sorted(os.environ), "
+        "'payer': os.environ.get('CHARTER_PAYER'), 'payer_url': os.environ.get('CHARTER_PAYER_URL'), "
+        "'offer_json': os.environ.get('CHARTER_OFFER_JSON'), "
+        "'connector': os.environ.get('CHARTER_CONNECTOR_URL')}) + '\\n')\n"
         f"if os.path.exists({str(tmp_path / 'fail')!r}):\n"
         "    sys.stderr.write('boom\\n'); sys.exit(1)\n"
         "print(json.dumps({'leaseId': 'L1', 'state': 'closed', 'paidIntervals': 1, 'spent': '6000',\n"
@@ -846,3 +852,63 @@ def test_bridge_rejects_oversized_stdin_without_spending_a_lease(vm):
     assert done.returncode != 0
     assert "error" in json.loads(done.stdout)
     assert calls(vm) == []
+
+
+# ---------- payer-url mode: charter pays through a local charter payer service (a Charter home) ----------
+
+
+def payer_mode(monkeypatch, charter, **env):
+    monkeypatch.setenv("CHARTER_BIN", str(charter["bin"]))
+    monkeypatch.setenv("CHARTER_PAYER_URL", "http://127.0.0.1:3510/")
+    monkeypatch.setenv("CHARTER_OFFER_ID", "a" * 64 + ":toon2-fetch-1")
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+
+def test_payer_mode_needs_no_passphrase_and_hands_charter_the_url_payer(monkeypatch, charter, tmp_path):
+    payer_mode(monkeypatch, charter)
+    monkeypatch.setenv("CHARTER_OFFER_JSON", '{"id":"toon2-fetch-1"}')
+    monkeypatch.setenv("CHARTER_CONNECTOR_URL", "https://connector.example/ilp")
+    monkeypatch.setenv("SOME_SECRET_TOKEN", "x")
+    out = rent({"script": SCRIPT})
+    assert out["leaseId"] == "L1" and out["spentUsdc"] == "0.006"
+    (call,) = charter_calls(charter)
+    assert call["payer"] == "url" and call["payer_url"] == "http://127.0.0.1:3510"
+    assert call["pass"] is None
+    assert call["offer_json"] == '{"id":"toon2-fetch-1"}' and call["connector"] == "https://connector.example/ilp"
+    env = set(call["env"]) - {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}
+    assert env == {"PATH", "HOME", "CHARTER_PAYER", "CHARTER_PAYER_URL", "CHARTER_OFFER_JSON",
+                   "CHARTER_CONNECTOR_URL"}, env
+    assert call["argv"][:3] == ["rent", "--offer", "a" * 64 + ":toon2-fetch-1"]
+    assert day_count(tmp_path).read_text() == "1\n"
+
+
+def test_payer_mode_without_the_box_variables_passes_only_the_payer(monkeypatch, charter):
+    payer_mode(monkeypatch, charter)
+    monkeypatch.delenv("CHARTER_OFFER_JSON", raising=False)
+    monkeypatch.delenv("CHARTER_CONNECTOR_URL", raising=False)
+    rent({"urls": URLS})
+    (call,) = charter_calls(charter)
+    env = set(call["env"]) - {"__CF_USER_TEXT_ENCODING", "LC_CTYPE"}
+    assert env == {"PATH", "HOME", "CHARTER_PAYER", "CHARTER_PAYER_URL"}, env
+
+
+def test_payer_mode_still_needs_the_offer_id(monkeypatch, charter, tmp_path):
+    monkeypatch.setenv("CHARTER_BIN", str(charter["bin"]))
+    monkeypatch.setenv("CHARTER_PAYER_URL", "http://127.0.0.1:3510")
+    err = rent({"urls": URLS})["error"]
+    assert "CHARTER_OFFER_ID" in err and "TOON_PASSPHRASE_FILE" not in err
+    assert charter_calls(charter) == [] and not day_count(tmp_path).exists()
+
+
+def test_without_a_payer_url_the_missing_passphrase_message_names_the_alternative(monkeypatch, charter):
+    monkeypatch.setenv("CHARTER_BIN", str(charter["bin"]))
+    monkeypatch.setenv("CHARTER_OFFER_ID", "a:b")
+    err = rent({"urls": URLS})["error"]
+    assert "TOON_PASSPHRASE_FILE" in err and "CHARTER_PAYER_URL" in err
+
+
+def test_the_manifest_lists_the_payer_url_setting():
+    m = yaml.safe_load((ROOT / "src/charter_tool/plugin.yaml").read_text())
+    assert "CHARTER_PAYER_URL" in m["optional_env"]
+    assert set(tools.SETTINGS) == set(m["optional_env"])

@@ -38,8 +38,16 @@ hash always covers the whole document.
 
 ## Install
 
-Two pieces: a local **payer sidecar** (Node 22, holds the channel and the
-spending rules) and this **plugin** (Python, talks to the sidecar).
+Two pieces: a local **payer** (Node 22, holds the channel and the spending
+rules) and this **plugin** (Python, talks to the payer over loopback). Two
+payers speak the contract the plugin expects, `GET /extract?url=`:
+
+- the **anonfetch payer sidecar** below, a Solana wallet paying one node; or
+- **`charter payer`** from the [charter](https://github.com/drew-dot-com/charter)
+  repo, the one process that owns a machine's channel, which is what an agent
+  living in a Charter home runs (see "Inside a Charter home" below). It pays
+  on Base or Solana and also pays the box's rent and the agent's relay posts
+  from the same channel.
 
 ### 1. The payer sidecar
 
@@ -122,28 +130,40 @@ its deposit stays locked.
 
 ## Second plugin: toon-node
 
-`src/toon_node` gives an agent three tools over its own
-[toon](https://github.com/toon-protocol/toon_cli) agent node, in toolset `toon`:
+`src/toon_node` gives an agent three tools over its own TOON payer, in toolset
+`toon`:
 
 | Tool | What it does | Cost |
 | --- | --- | --- |
 | `toon_post` | Publishes a kind 1 note to a TOON relay, paying its price | 0.001 USDC on the default relay |
-| `toon_read` | Reads notes from that relay | free |
-| `toon_status` | Network, wallet balances read from the chains, channels, spending limit | free |
+| `toon_read` | Reads events from that relay | free |
+| `toon_status` | Network, the payer wallet's balances read from the chain, the channel, today's spend, post count | free |
 
-`toon` runs on Linux only, so on a Mac the node lives in a Lima VM. The plugin
-reaches it through `vm/toon-bridge`, one script in the VM that takes only
-`post` or `status`, receives user text as JSON on stdin, caps posts at 50 a
-day, and keeps the wallet passphrase inside the VM. Install the script at
-`~/bin/toon-bridge` in the VM, write the node's public facts (network,
-addresses, agent identity) to `~/.toon-bridge/wallet.json` there, then:
+Everything paid goes through a `charter payer` service at `TOON_PAYER_URL`, the
+same variable `web-toon` uses: the service signs the note with its own Nostr
+key and pays it onto the relay route (`POST /relay/post`), reads the relay for
+free over its own WebSocket (`GET /relay/read`, which follows the machine's
+proxy, so it works inside a Charter home), and reports its channel
+(`GET /health`). The plugin holds no key and never sees one.
 
 ```sh
 hermes plugins install 'https://github.com/drew-dot-com/hermes-toon#src/toon_node'
 ```
 
-and add `toon` to a platform's toolsets. Settings: `TOON_LIMACTL`, `TOON_VM`,
-`TOON_BRIDGE`, `TOON_RELAY_URL`, `TOON_BASE_RPC`, `TOON_SOLANA_RPC`.
+and add `toon` to a platform's toolsets. Settings: `TOON_PAYER_URL` (required),
+`TOON_RELAY_URL` (default `wss://relay.mainnet.toonprotocol.dev`),
+`TOON_POST_CAP` (posts a UTC day, default 50, counted under a file lock before
+the service is asked), `TOON_STATE_DIR` (the counter, default `~/.toon-node`),
+`TOON_BASE_RPC`.
+
+> **Disclosure.** Each `toon_post` spends the relay's price from the payer's
+> channel with no confirmation per call, under `TOON_POST_CAP` here and the
+> service's own daily cap on fetches and posts (`CHARTER_PAYER_DAILY_CAP`).
+
+**Upgrading from 0.1.0:** the Lima bridge (`vm/toon-bridge`, `TOON_LIMACTL`,
+`TOON_VM`, `TOON_BRIDGE`, `TOON_SOLANA_RPC`) is gone; run a `charter payer`
+and set `TOON_PAYER_URL`. Posts are now signed by the service's key, not the
+`toon` node's agent identity, so `mine` in `toon_read` means that key.
 
 ## Third plugin: charter-tool
 
@@ -206,7 +226,8 @@ All optional except the two the `charter` CLI needs. Put them in
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `TOON_PASSPHRASE_FILE` | file holding the node wallet's passphrase; handed to `charter`, never read here | required without a bridge |
+| `TOON_PASSPHRASE_FILE` | file holding the node wallet's passphrase; handed to `charter`, never read here | required without a bridge or a payer URL |
+| `CHARTER_PAYER_URL` | a local `charter payer` service; `charter` then pays through it (`CHARTER_PAYER=url`) and no passphrase file is needed | unset |
 | `CHARTER_OFFER_ID` | `<host pubkey>:<offer id>` from `charter offers` | required without a bridge |
 | `CHARTER_RELAY_URL` | the relay that carries offers | `wss://relay.mainnet.toonprotocol.dev` |
 | `CHARTER_MAX_INTERVALS` | hours one call may pay for, 1 to 24 | `1` (about 0.0083 USDC for a short job) |
@@ -247,6 +268,30 @@ the Lima bridge, set `CHARTER_BRIDGE_CMD` as above, since the old
 sells by the hour since 2026-11-04, so `CHARTER_MAX_INTERVALS` now counts hours
 and defaults to 1 (it was 6 intervals of 30 seconds); a bridge installed from
 0.2.0 still caps at 6, so copy the new `vm/charter-bridge` into the VM.
+
+## Inside a Charter home: one payer for everything
+
+An agent that lives in a [Charter home](https://github.com/drew-dot-com/charter)
+(a rented box with its own wallet) has no `toon` node and no Lima VM, and it
+pays for more than one thing: its rent, its paid fetches, its relay posts, its
+own Charter jobs. All of that must come from one channel to the box's edge
+connector, and a channel voucher names a running total, so only one process may
+sign on it. The box therefore runs one `charter payer` and every payer in it
+goes through that service:
+
+```
+charter payer            owns ~/.charter/channels.json, listens on 127.0.0.1:3510
+charter renew            CHARTER_PAYER=url: the rent, one tick an hour
+web-toon                 TOON_PAYER_URL=http://127.0.0.1:3510   GET /extract
+toon-node                TOON_PAYER_URL=http://127.0.0.1:3510   POST /relay/post, GET /relay/read, GET /health
+charter-tool             CHARTER_PAYER_URL=http://127.0.0.1:3510, CHARTER_BIN=~/.local/bin/charter, CHARTER_OFFER_ID=<host>:<offer>
+```
+
+The three plugins then need no bridge, no passphrase file and no second wallet;
+`~/.hermes/.env` carries only the URLs above. The service's `/health` shows the
+channel's headroom and the day's spend, and `toon_status` reports it. Edison,
+Drew Pierson's Hermes agent, has run this way since 2026-11-05 from a home on
+toon2, paying a two-hop mesh (box to Drew's edge to a seller) from one channel.
 
 ## Development
 
