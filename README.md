@@ -188,7 +188,11 @@ what the call cost. Prices are the offer's (an offer lives 45 minutes and the ho
 republishes it); `charter offers` shows them.
 
 > **Disclosure.** Each `charter_rent` call spends real USDC from the node
-> wallet with no confirmation per call. The plugin runs the `charter` binary
+> wallet, and Hermes asks you to approve each one first: the plugin's
+> `pre_tool_call` hook sends the call to Hermes's approval gate with the most it
+> can spend and the job (once, session, always or deny; a denial or timeout
+> blocks it, and cron or any other run with no human present is denied unless
+> you change `approvals.cron_mode`). The plugin runs the `charter` binary
 > (or your bridge command) as a subprocess with a minimal environment and hands
 > it the path in `TOON_PASSPHRASE_FILE`; it never reads the passphrase itself,
 > and never reads a `.env` file. The caps below and the node's own spending
@@ -234,7 +238,7 @@ All optional except the two the `charter` CLI needs. Put them in
 | `CHARTER_DAILY_LEASES` | leases a UTC day; `0` refuses every call | `5` |
 | `CHARTER_ALLOWED_IDS` | who may call it, as `platform:user_id` entries, e.g. `telegram:123,discord:456` | empty: everyone Hermes already lets talk to the agent |
 | `CHARTER_BIN` | path to the `charter` binary | `charter` on PATH |
-| `CHARTER_STATE_DIR` | where the day counter and script temp files live | `~/.charter-tool` |
+| `CHARTER_STATE_DIR` | where the day counter and script temp files live | `<HERMES_HOME>/plugin-data/charter-tool`, one per profile (0.4.0 and earlier: `~/.charter-tool`) |
 | `CHARTER_BRIDGE_CMD` | a command that rents on another machine (below) | unset |
 
 A malformed cap refuses every call by variable name. The day counter is taken

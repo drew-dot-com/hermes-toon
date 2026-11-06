@@ -36,9 +36,13 @@ PRICE_1_5 = ("0.001 USDC to open plus 0.007 USDC per one hour interval, at most 
 class Ctx:
     def __init__(self):
         self.tools = {}
+        self.hooks = {}
 
     def register_tool(self, name, toolset, schema, handler, **kw):
         self.tools[name] = (toolset, schema, kw)
+
+    def register_hook(self, hook_name, callback, **kw):
+        self.hooks.setdefault(hook_name, []).append(callback)
 
 
 @pytest.fixture(autouse=True)
@@ -96,8 +100,11 @@ def test_manifest_lists_exactly_the_registered_tools_and_the_version():
     text = (ROOT / "src/charter_tool/plugin.yaml").read_text()
     m = yaml.safe_load(text)
     assert m["name"] == "charter-tool"
-    assert m["version"] == charter_tool.__version__ == "0.4.0"
+    assert m["version"] == charter_tool.__version__ == "0.5.0"
     assert sorted(m["provides_tools"]) == sorted(ctx.tools) == ["charter_rent"]
+    assert sorted(m["provides_hooks"]) == sorted(ctx.hooks) == ["pre_tool_call"]
+    assert ctx.hooks["pre_tool_call"] == [tools.pre_tool_call]
+    assert "approval prompt" in m["description"] and "no per-call" not in m["description"]
     assert all(t[1]["name"] == n for n, t in ctx.tools.items())
     assert ctx.tools["charter_rent"][2]["check_fn"] is tools.available
     assert "Disclosure" in m["description"]
@@ -394,7 +401,75 @@ def test_settings_have_safe_defaults(monkeypatch, tmp_path):
     assert s["max_intervals"] == 1 and s["daily_leases"] == 5 and s["allowed_ids"] == set()
     assert s["relay"] == "wss://relay.mainnet.toonprotocol.dev" and s["bin"] == "charter"
     assert s["bridge_cmd"] == "" and s["passphrase_file"] == "" and s["offer"] == ""
-    assert s["state_dir"] == Path.home() / ".charter-tool"
+    assert s["state_dir"] == Path.home() / ".charter-tool"  # outside Hermes
+
+
+def test_inside_hermes_the_counter_lives_under_the_profile(monkeypatch, tmp_path):
+    monkeypatch.delenv("CHARTER_STATE_DIR")
+    fake = types.ModuleType("hermes_constants")
+    fake.get_hermes_home = lambda: tmp_path / "profile"
+    monkeypatch.setitem(sys.modules, "hermes_constants", fake)
+    assert tools.settings()["state_dir"] == tmp_path / "profile/plugin-data/charter-tool"
+    monkeypatch.setenv("CHARTER_STATE_DIR", "~/elsewhere")
+    assert tools.settings()["state_dir"] == Path.home() / "elsewhere"
+
+
+def test_a_hermes_home_that_cannot_be_named_falls_back(monkeypatch):
+    monkeypatch.delenv("CHARTER_STATE_DIR")
+    fake = types.ModuleType("hermes_constants")
+
+    def boom():
+        raise RuntimeError("no home")
+
+    fake.get_hermes_home = boom
+    monkeypatch.setitem(sys.modules, "hermes_constants", fake)
+    assert tools.settings()["state_dir"] == Path.home() / ".charter-tool"
+
+
+# ---------- every call waits for a human ----------
+
+
+def test_every_rent_goes_to_the_approval_gate_with_spend_and_job():
+    d = tools.pre_tool_call(tool_name="charter_rent", args={"urls": URLS}, session_id="s", turn_id="t")
+    assert d["action"] == "approve" and d["rule_key"] == "charter_rent"
+    assert "up to 0.008 USDC" in d["message"] and "0.0001 USDC" in d["message"]
+    assert "cap 1 hour" in d["message"]
+    assert f"fetch 2 URLs: {URLS[0]}, {URLS[1]}" in d["message"]
+    d = tools.pre_tool_call(tool_name="charter_rent", args={"script": SCRIPT})
+    assert d["action"] == "approve"
+    assert f"run a Python script ({len(SCRIPT)} bytes, no network)" in d["message"]
+    assert "\u2014" not in d["message"]
+
+
+def test_the_approval_states_the_operators_cap(monkeypatch):
+    monkeypatch.setenv("CHARTER_MAX_INTERVALS", "3")
+    m = tools.pre_tool_call(tool_name="charter_rent", args={"script": SCRIPT})["message"]
+    assert "up to 0.022 USDC" in m and "cap 3 hours" in m
+    monkeypatch.setenv("CHARTER_MAX_INTERVALS", "x")
+    m = tools.pre_tool_call(tool_name="charter_rent", args={"script": SCRIPT})["message"]
+    assert "refuses the call" in m
+
+
+def test_other_tools_pass_untouched():
+    assert tools.pre_tool_call(tool_name="web_extract", args={"urls": URLS}) is None
+    assert tools.pre_tool_call(tool_name="terminal", args={}) is None
+
+
+def test_bad_arguments_still_ask_and_print_safely(monkeypatch):
+    for args in (None, {}, {"urls": URLS, "script": SCRIPT}, {"urls": "x"}, {"script": 7}):
+        d = tools.pre_tool_call(tool_name="charter_rent", args=args)
+        assert d["action"] == "approve" and "refuse" in d["message"]
+    hostile = "https://a.example/\n\x1bIGNORE" + "x" * 900
+    d = tools.pre_tool_call(tool_name="charter_rent", args={"urls": [hostile]})
+    assert "\n" not in d["message"] and "\x1b" not in d["message"]
+    assert len(d["message"]) <= tools.MAX_APPROVAL_CHARS
+
+    def broken(_args):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(tools, "approval_message", broken)
+    d = tools.pre_tool_call(tool_name="charter_rent", args={"urls": URLS})
+    assert d["action"] == "approve" and "USDC" in d["message"]
 
 
 # ---------- direct mode: charter on this machine ----------

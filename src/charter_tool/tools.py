@@ -9,10 +9,12 @@ machine that runs a ``charter payer`` service, sets ``CHARTER_PAYER_URL`` instea
 file: ``charter`` then pays through that one local service, which owns the channel every process
 on the machine shares (``charter payer``, docs/env.md in the charter repo).
 
-Every call spends real USDC from the operator's node wallet, so the plugin bounds a call
-(``CHARTER_MAX_INTERVALS``), bounds a day (``CHARTER_DAILY_LEASES``, counted here before the
-lease starts) and, when the operator asks, bounds who may call it (``CHARTER_ALLOWED_IDS``).
-Settings are read when the tool runs, through Hermes's secret scope when it is importable.
+Every call spends real USDC from the operator's node wallet, so a human approves each call
+first (``pre_tool_call`` below sends it to Hermes's approval gate, which fails closed when no human
+is present), and the plugin bounds a call (``CHARTER_MAX_INTERVALS``), bounds a day
+(``CHARTER_DAILY_LEASES``, counted here before the lease starts) and, when the operator asks,
+bounds who may call it (``CHARTER_ALLOWED_IDS``). Settings are read when the tool runs, through
+Hermes's secret scope when it is importable.
 """
 
 from __future__ import annotations
@@ -101,8 +103,22 @@ def settings() -> dict:
         "max_intervals": _int_setting("CHARTER_MAX_INTERVALS", DEFAULT_MAX_INTERVALS, 1, HARD_MAX_INTERVALS),
         "daily_leases": _int_setting("CHARTER_DAILY_LEASES", DEFAULT_DAILY_LEASES, 0, 999_999),
         "allowed_ids": {p.strip() for p in _setting("CHARTER_ALLOWED_IDS").split(",") if p.strip()},
-        "state_dir": Path(_setting("CHARTER_STATE_DIR") or "~/.charter-tool").expanduser(),
+        "state_dir": Path(_setting("CHARTER_STATE_DIR")).expanduser() if _setting("CHARTER_STATE_DIR")
+        else default_state_dir(),
     }
+
+
+def default_state_dir() -> Path:
+    """Where the day counter lives: under the running Hermes profile, so each profile counts its own.
+
+    ``<HERMES_HOME>/plugin-data/charter-tool``, or ``~/.charter-tool`` outside Hermes.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+
+        return Path(get_hermes_home()) / "plugin-data" / "charter-tool"
+    except Exception:  # not inside Hermes, or Hermes could not name its home
+        return Path("~/.charter-tool").expanduser()
 
 
 def charter_path(binary: str) -> str | None:
@@ -286,6 +302,59 @@ def run_job(s: dict, job: dict) -> dict:
     return run_bridge(s, job) if s["bridge_cmd"] else run_charter(s, job)
 
 
+# ---------- the human's yes ----------
+
+APPROVAL_RULE = "charter_rent"  # the grain of Hermes's "always": every charter_rent call alike
+MAX_APPROVAL_CHARS = 500
+UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _job_line(args) -> str:
+    """What the call would run, from the model's arguments, printable and short."""
+    urls, script = args.get("urls"), args.get("script")
+    if script is not None and urls is None and isinstance(script, str):
+        size = len(script.encode("utf-8", "replace"))
+        return f"run a Python script ({size} bytes, no network)"
+    if urls is not None and script is None and isinstance(urls, list) and urls:
+        shown = ", ".join(UNPRINTABLE.sub(" ", str(u))[:120] for u in urls[:MAX_URLS])
+        plural = "" if len(urls) == 1 else "s"
+        return f"fetch {len(urls)} URL{plural}: {shown}"
+    return "a job the tool will refuse (pass exactly one of urls and script)"
+
+
+def approval_message(args) -> str:
+    """The line the human approves: the most the call can spend, and the job."""
+    try:
+        n = settings()["max_intervals"]
+    except SettingError:
+        n = None
+    if n is None:
+        spend = "nothing, since a malformed CHARTER_MAX_INTERVALS refuses the call"
+    else:
+        plural = "" if n == 1 else "s"
+        spend = (f"up to {usdc(OPEN_UNITS + TICK_UNITS * n)} USDC plus a few {usdc(STATUS_UNITS)} USDC "
+                 f"status reads ({usdc(OPEN_UNITS)} to open, {usdc(TICK_UNITS)} per hour, "
+                 f"cap {n} hour{plural})")
+    text = f"Pay {spend} from the toon wallet for a Charter lease to {_job_line(args)}"
+    return text[:MAX_APPROVAL_CHARS]
+
+
+def pre_tool_call(tool_name: str = "", args=None, **_) -> dict | None:
+    """Send every ``charter_rent`` call to Hermes's human-approval gate before it can pay.
+
+    Hermes asks the user (CLI prompt or gateway message: once, session, always, deny), blocks on a
+    denial or a timeout, and blocks outright where no human can answer (cron denies by default).
+    Other tools pass untouched.
+    """
+    if tool_name != "charter_rent":
+        return None
+    try:
+        message = approval_message(args if isinstance(args, dict) else {})
+    except Exception:  # never let a bad argument skip the gate
+        message = "Pay real USDC from the toon wallet for a Charter lease"
+    return {"action": "approve", "message": message, "rule_key": APPROVAL_RULE}
+
+
 # ---------- the tool ----------
 
 
@@ -312,7 +381,8 @@ RENT_SCHEMA = {
         "(pass urls; the page texts come back) or run a Python 3 script (pass script; its stdout, "
         "stderr and exit code come back). Pass exactly one of urls and script. The script runs with "
         "no network, at most 8 KiB of UTF-8, NumPy available; it must print what it wants returned. "
-        f"Each call is a real payment from this node's wallet: {usdc(OPEN_UNITS)} USDC to open plus "
+        "Each call is a real payment from this node's wallet, and Hermes asks the user to approve it first: "
+        f"{usdc(OPEN_UNITS)} USDC to open plus "
         f"{usdc(TICK_UNITS)} USDC per {INTERVAL_TEXT} interval plus a few {usdc(STATUS_UNITS)} USDC status "
         f"reads, up to the operator's interval cap (default {DEFAULT_MAX_INTERVALS}, so about "
         f"{usdc(OPEN_UNITS + TICK_UNITS * DEFAULT_MAX_INTERVALS + 3 * STATUS_UNITS)} USDC for a short job), "
